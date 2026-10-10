@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Agent Chirp",
+    "description": "Plays gentle musical chirps while the agent works — different sounds for thinking, generating, and tool use."
+  }
+}

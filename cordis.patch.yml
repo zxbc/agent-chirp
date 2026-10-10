@@ -1,0 +1,7 @@
+- insert:
+    - id: agent-chirp
+      name: '@local/agent-chirp'
+      config:
+        enabled: true
+        volume: 0.25
+        intensity: 0.7
