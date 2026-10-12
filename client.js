@@ -39,8 +39,11 @@ window.__ModuleLoader__.load({
       let padLfoGain = null;
       let timer = null;
       let currentPhase = 'idle';
+      // Deferred transition: { phase, prev } — started only once the
+      // AudioContext is actually running (autoplay policy).
       let pendingPhase = null;
       let noiseBuffer = null;
+      let onContextState = null;
 
       function ensureContext() {
         if (!ctx) {
@@ -48,6 +51,18 @@ window.__ModuleLoader__.load({
           masterGain = ctx.createGain();
           masterGain.gain.value = currentVolume;
           masterGain.connect(ctx.destination);
+          // resume() is asynchronous: a synchronous ctx.state check right
+          // after resume (in a click/keydown handler) still reads
+          // 'suspended', so a deferred transition could never be consumed —
+          // and a pad started before the suspension would keep sounding
+          // indefinitely, surviving even session switches (currentPhase
+          // already matches the UI phase, so setPhase('idle') is a no-op).
+          // Re-apply the pending transition the moment the context actually
+          // starts running.
+          onContextState = () => {
+            if (ctx.state === 'running') consumePendingPhase();
+          };
+          ctx.addEventListener('statechange', onContextState);
         }
         if (ctx.state === 'suspended') {
           ctx.resume();
@@ -211,6 +226,10 @@ window.__ModuleLoader__.load({
       // running, so nothing is scheduled while suspended (scheduling during
       // suspension and bursting on resume was a pop source).
       function startPhaseAudio(phase, prev) {
+        // Belt and braces: no interval may survive a phase change, even if a
+        // caller forgot to clear it (a leaked interval keeps firing notes
+        // indefinitely).
+        clearTimer();
         if (phase === 'thinking') {
           startThinkingPad();
           timer = setInterval(playThinkingNote, 1400);
@@ -228,14 +247,31 @@ window.__ModuleLoader__.load({
         }
       }
 
+      // Apply the deferred transition once the context is running, but only
+      // if it is still the current phase. If the UI moved on in the meantime
+      // (e.g. the turn ended while the context was suspended), the pending
+      // transition is stale: starting it would create a pad/timer that no
+      // future setPhase can stop, because currentPhase already matches the
+      // UI phase.
+      function consumePendingPhase() {
+        if (!pendingPhase) return;
+        if (!ctx || ctx.state !== 'running') return;
+        const pending = pendingPhase;
+        pendingPhase = null;
+        if (pending.phase !== currentPhase) return;
+        startPhaseAudio(pending.phase, pending.prev);
+      }
+
       function setPhase(phase) {
         if (phase === currentPhase) return;
         const prev = currentPhase;
         currentPhase = phase;
         clearTimer();
         // Defer audio until the context is actually running (user gesture).
+        // Keep prev with the pending record so a deferred 'idle' still plays
+        // the done-chime when it is finally applied.
         if (!ctx || ctx.state !== 'running') {
-          pendingPhase = phase;
+          pendingPhase = { phase, prev };
           return;
         }
         startPhaseAudio(phase, prev);
@@ -243,18 +279,30 @@ window.__ModuleLoader__.load({
 
       function onUserInteraction() {
         ensureContext();
-        if (pendingPhase && ctx && ctx.state === 'running') {
-          const p = pendingPhase;
-          pendingPhase = null;
-          startPhaseAudio(p, 'idle');
-        }
+        consumePendingPhase();
       }
 
       return {
         setPhase,
         setVolume,
         getVolume: () => currentVolume,
-        dispose: () => { clearTimer(); stopPad(); },
+        dispose: () => {
+          clearTimer();
+          stopPad();
+          pendingPhase = null;
+          if (ctx) {
+            if (onContextState) {
+              try { ctx.removeEventListener('statechange', onContextState); } catch (_) {}
+              onContextState = null;
+            }
+            // Release the AudioContext: the component remounts per session,
+            // and unclosed contexts accumulate until the browser refuses to
+            // create new ones.
+            try { Promise.resolve(ctx.close()).catch(() => {}); } catch (_) {}
+            ctx = null;
+            masterGain = null;
+          }
+        },
         onUserInteraction,
       };
     }
@@ -343,13 +391,13 @@ window.__ModuleLoader__.load({
         return !!entry && entry.running === true;
       });
 
-      // Best-effort live phase from the chat view's streaming partial. When
-      // the conversation views store exposes the partial, its last block
-      // kind reflects what the model is doing right now (reasoning →
-      // thinking, text → answering, tool-call → tools). This is consulted
-      // before the durable projection; when it is null we fall back to the
-      // durable phase, which is still correct for turn start/stop because
-      // `running` gates those transitions in real time.
+      // Best-effort live phase from the chat view's streaming partial. While
+      // a turn is running, the last block kind of the exposed partial
+      // reflects what the model is doing right now (reasoning → thinking,
+      // text → answering, tool-call → tools). It is consulted before the
+      // durable projection, but ONLY while `running` is true: the view
+      // retains the last partial after the turn ends, so outside a turn it
+      // is stale and must not drive the phase.
       const liveBlockKind = useConversation((conv) => {
         const chat = conv && conv.views ? conv.views.get('chat') : undefined;
         const partial = chat && chat.legacy ? chat.legacy.partial : null;
@@ -412,14 +460,18 @@ window.__ModuleLoader__.load({
       }, [volume]);
 
       // Effective phase, in priority order:
+      //  0. Idle — while no turn is running, sounds stop immediately,
+      //     without waiting for a durable turn/end commit. This MUST come
+      //     before the live-partial check: the conversation view retains
+      //     the last streamed partial after the turn ends (e.g. a final
+      //     reasoning block), so consulting it while idle would pin the
+      //     phase to 'thinking' and the pad would keep playing forever.
       //  1. Live partial block kind — real-time thinking/answering/tools
-      //     while the stream is exposed through the conversation views.
-      //  2. Durable projection phase — correct at turn boundaries because
-      //     `running` (real-time) gates whether we're in a turn at all.
-      //  3. Idle — when no turn is running, sounds stop immediately instead
-      //     of waiting for a durable turn/end commit.
+      //     while a turn is running and the stream is exposed through the
+      //     conversation views.
+      //  2. Durable projection phase — fallback while running.
       let effectivePhase;
-      if (!enabled) {
+      if (!enabled || !running) {
         effectivePhase = 'idle';
       } else if (liveBlockKind === 'reasoning') {
         effectivePhase = 'thinking';
@@ -427,10 +479,8 @@ window.__ModuleLoader__.load({
         effectivePhase = 'answering';
       } else if (liveBlockKind === 'tool-call') {
         effectivePhase = 'tools';
-      } else if (running) {
-        effectivePhase = durablePhase;
       } else {
-        effectivePhase = 'idle';
+        effectivePhase = durablePhase;
       }
 
       React.useEffect(() => {
