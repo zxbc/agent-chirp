@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.1.0] - 2026-10-15
+
+### Changed
+- **Thinking pad is much quieter.** The continuous pad (the "drone") was
+  the loudest element of the thinking sound and caused ear fatigue during
+  long thinking blocks. Its level dropped from `0.028 × intensity` to
+  `0.009 × intensity` (≈ −10 dB), and its slow LFO swell from `0.011` to
+  `0.004` to keep the same relative motion. The sparse pentatonic notes are
+  unchanged.
+- **Done-chime is warmer and more rounded.** Same four notes (G5–E5–D5–C5),
+  but each note is now a triangle wave paired with a +6-cent detuned partner
+  feeding a lower 1100 Hz low-pass (was 1900 Hz), so the bright upper
+  harmonics no longer survive. The attack slowed from 25 ms to 45 ms for a
+  rounder onset, and the peak gain dropped from `0.24` to `0.18` to keep the
+  overall loudness about the same despite the doubled source.
+
 ## [1.0.1] - 2026-10-12
 
 ### Fixed

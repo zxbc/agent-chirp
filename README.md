@@ -9,10 +9,10 @@ ticks while tools run, and a bright arpeggio when the turn completes.
 
 | Phase | When | Sound |
 |---|---|---|
-| thinking | the model is reasoning | warm D3 ambient pad with a slow swell, plus sparse soft pentatonic notes (±2% detune) every ~1.4 s |
+| thinking | the model is reasoning | quiet detuned D4/A4 shimmer through a low-pass filter with a slow swell, plus sparse soft pentatonic notes every ~1.4 s |
 | answering | text is streaming in | mechanical typewriter key-clicks — short band-passed noise bursts, ~75 ms apart |
 | using tools | tool calls execute | soft, rounded 440 Hz sine ticks every ~300 ms |
-| done | the turn ends | a bright four-note major arpeggio chime (C5–E5–G5–C6) |
+| done | the turn ends | a soft descending four-note chime (G5–E5–D5–C5) with filtered triangle waves |
 
 ## The pill
 

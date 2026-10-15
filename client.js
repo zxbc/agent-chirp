@@ -33,7 +33,8 @@ window.__ModuleLoader__.load({
       let ctx = null;
       let masterGain = null;
       let currentVolume = volume;
-      let padOsc = null;
+      let padOscA = null;
+      let padOscB = null;
       let padGain = null;
       let padLfo = null;
       let padLfoGain = null;
@@ -78,48 +79,71 @@ window.__ModuleLoader__.load({
       }
 
       // Fade the pad out before stopping/disconnecting so leaving "thinking"
-      // doesn't cut the sine wave mid-sample (the abrupt stop was the loud pop).
+      // doesn't cut the oscillators mid-sample.
       function stopPad() {
-        if (!padOsc) return;
+        if (!padOscA && !padOscB) return;
         const now = ctx ? ctx.currentTime : 0;
         if (padGain) {
           try {
             padGain.gain.cancelScheduledValues(now);
-            padGain.gain.setTargetAtTime(0, now, 0.04);
+            padGain.gain.setTargetAtTime(0, now, 0.05);
           } catch (_) {}
         }
-        try { padOsc.stop(now + 0.18); } catch (_) {}
-        try { padLfo.stop(now + 0.18); } catch (_) {}
-        const osc = padOsc, gain = padGain, lfo = padLfo, lfoGain = padLfoGain;
-        padOsc = null; padGain = null; padLfo = null; padLfoGain = null;
+        for (const node of [padOscA, padOscB, padLfo]) {
+          try { node.stop(now + 0.3); } catch (_) {}
+        }
+        const oscA = padOscA, oscB = padOscB, gain = padGain;
+        const lfo = padLfo, lfoGain = padLfoGain;
+        padOscA = null; padOscB = null; padGain = null;
+        padLfo = null; padLfoGain = null;
         setTimeout(() => {
-          try { osc.disconnect(); } catch (_) {}
-          try { gain.disconnect(); } catch (_) {}
-          try { lfo.disconnect(); } catch (_) {}
-          try { lfoGain.disconnect(); } catch (_) {}
-        }, 220);
+          for (const node of [oscA, oscB, gain, lfo, lfoGain]) {
+            try { node.disconnect(); } catch (_) {}
+          }
+        }, 360);
       }
 
-      // Gentle ambient bed for "thinking": a warm low tone with a slow,
-      // subtle LFO — calm and airy rather than droney.
+      // Very quiet shimmering bed for "thinking": two softly detuned
+      // mid-range oscillators passed through a low-pass filter, with a slow
+      // amplitude swell. Kept well below the old level — the continuous pad
+      // is what fatigues the ear over long thinking blocks.
       function startThinkingPad() {
         const c = ensureContext();
         stopPad();
-        padOsc = c.createOscillator();
-        padOsc.type = 'sine';
-        padOsc.frequency.value = 146.83; // D3 — soft, warm
+
         padGain = c.createGain();
         padGain.gain.value = 0;
-        padGain.gain.setTargetAtTime(0.055 * intensity, c.currentTime, 0.4);
+        padGain.gain.setTargetAtTime(0.009 * intensity, c.currentTime, 0.6);
+
+        const filter = c.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.value = 900;
+        filter.Q.value = 0.4;
+
+        padOscA = c.createOscillator();
+        padOscA.type = 'sine';
+        padOscA.frequency.value = 293.66; // D4
+        padOscA.detune.value = -6;
+
+        padOscB = c.createOscillator();
+        padOscB.type = 'triangle';
+        padOscB.frequency.value = 440.0; // A4
+        padOscB.detune.value = 7;
+
         padLfo = c.createOscillator();
-        padLfo.frequency.value = 0.25; // slower, gentler swell
+        padLfo.frequency.value = 0.18;
         padLfoGain = c.createGain();
-        padLfoGain.gain.value = 0.02;
+        padLfoGain.gain.value = 0.004 * intensity;
+
         padLfo.connect(padLfoGain);
         padLfoGain.connect(padGain.gain);
-        padOsc.connect(padGain);
+        padOscA.connect(filter);
+        padOscB.connect(filter);
+        filter.connect(padGain);
         padGain.connect(masterGain);
-        padOsc.start();
+
+        padOscA.start();
+        padOscB.start();
         padLfo.start();
       }
 
@@ -196,25 +220,41 @@ window.__ModuleLoader__.load({
         osc.stop(now + 0.14);
       }
 
-      // Bright ascending chime — a loud, clear "all done" conclusion.
-      // Three-note major arpeggio (C5-E5-G5) with a final C6 sparkle.
+      // Relaxed descending completion chime: G5, E5, D5, and C5. Each note
+      // pairs a triangle wave with a slightly detuned partner and runs them
+      // through a low 1100 Hz low-pass so only the fundamentals survive —
+      // warm and rounded instead of bright. A slow attack and the longer
+      // release keep the ending soft rather than tense; the lower peak gain
+      // compensates for the doubled source so it is not louder than before.
       function playDoneChime() {
         const c = ensureContext();
         const now = c.currentTime;
-        const notes = [523.25, 659.25, 783.99, 1046.5];
+        const notes = [783.99, 659.25, 587.33, 523.25];
         notes.forEach((freq, i) => {
           const osc = c.createOscillator();
+          const oscWarm = c.createOscillator();
+          const filter = c.createBiquadFilter();
           const gain = c.createGain();
+          osc.type = 'triangle';
           osc.frequency.value = freq;
-          osc.type = 'sine';
-          const t = now + i * 0.11;
+          oscWarm.type = 'triangle';
+          oscWarm.frequency.value = freq;
+          oscWarm.detune.value = 6;
+          filter.type = 'lowpass';
+          filter.frequency.value = 1100;
+          filter.Q.value = 0.3;
+          const t = now + i * 0.135;
           gain.gain.setValueAtTime(0, t);
-          gain.gain.linearRampToValueAtTime(0.38 * intensity, t + 0.02);
-          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
-          osc.connect(gain);
+          gain.gain.linearRampToValueAtTime(0.18 * intensity, t + 0.045);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
+          osc.connect(filter);
+          oscWarm.connect(filter);
+          filter.connect(gain);
           gain.connect(masterGain);
           osc.start(t);
-          osc.stop(t + 0.6);
+          osc.stop(t + 0.7);
+          oscWarm.start(t);
+          oscWarm.stop(t + 0.7);
         });
       }
 
