@@ -10,628 +10,515 @@ window.__ModuleLoader__.load({
     const SCALE_HIGH = [523.25, 587.33, 659.25, 783.99, 880.0, 1046.5];
 
     const VOLUME_STORAGE_KEY = 'agentChirp.volume';
+    const CHAT_COLUMN_SELECTOR = '[data-chat-flow]';
+    const CORE_RUNNING_SELECTOR = '[data-chat-running]';
+    const INDICATOR_ATTR = 'data-agent-chirp-indicator';
+    const HIDE_CSS_ID = 'agent-chirp-hide-core-css';
 
     function readStoredVolume(fallback) {
       try {
-        const raw = localStorage.getItem(VOLUME_STORAGE_KEY);
-        if (raw !== null) {
-          const v = parseFloat(raw);
-          if (!isNaN(v) && v >= 0 && v <= 1) return v;
+        const s = localStorage.getItem(VOLUME_STORAGE_KEY);
+        if (s !== null) {
+          const n = parseFloat(s);
+          if (Number.isFinite(n)) return Math.min(1, Math.max(0, n));
         }
-      } catch (_) { /* storage unavailable */ }
+      } catch {}
       return fallback;
     }
 
-    function storeVolume(v) {
-      try {
-        localStorage.setItem(VOLUME_STORAGE_KEY, String(v));
-      } catch (_) { /* storage unavailable */ }
+    // Format milliseconds as "[min]m[sec]s" — e.g. 312000 -> "5m12s", 45000 -> "45s".
+    function formatDuration(ms) {
+      const totalSec = Math.max(0, Math.floor(ms / 1000));
+      const min = Math.floor(totalSec / 60);
+      const sec = totalSec % 60;
+      if (min > 0) return min + 'm' + sec + 's';
+      return sec + 's';
     }
 
-    // --- Audio engine ---
     function createAudioEngine(volume, intensity) {
       let ctx = null;
-      let masterGain = null;
+      let master = null;
       let currentVolume = volume;
-      let padOscA = null;
-      let padOscB = null;
-      let padGain = null;
-      let padLfo = null;
-      let padLfoGain = null;
-      let timer = null;
-      let currentPhase = 'idle';
-      // Deferred transition: { phase, prev } — started only once the
-      // AudioContext is actually running (autoplay policy).
-      let pendingPhase = null;
-      let noiseBuffer = null;
-      let onContextState = null;
+      let currentIntensity = intensity;
 
-      function ensureContext() {
+      function ensureCtx() {
         if (!ctx) {
-          ctx = new (window.AudioContext || window.webkitAudioContext)();
-          masterGain = ctx.createGain();
-          masterGain.gain.value = currentVolume;
-          masterGain.connect(ctx.destination);
-          // resume() is asynchronous: a synchronous ctx.state check right
-          // after resume (in a click/keydown handler) still reads
-          // 'suspended', so a deferred transition could never be consumed —
-          // and a pad started before the suspension would keep sounding
-          // indefinitely, surviving even session switches (currentPhase
-          // already matches the UI phase, so setPhase('idle') is a no-op).
-          // Re-apply the pending transition the moment the context actually
-          // starts running.
-          onContextState = () => {
-            if (ctx.state === 'running') consumePendingPhase();
-          };
-          ctx.addEventListener('statechange', onContextState);
+          ctx = new AudioContext();
+          master = ctx.createGain();
+          master.gain.value = currentVolume;
+          master.connect(ctx.destination);
         }
-        if (ctx.state === 'suspended') {
-          ctx.resume();
-        }
-        return ctx;
+        if (ctx.state === 'suspended') ctx.resume();
       }
 
       function setVolume(v) {
         currentVolume = v;
-        if (masterGain) {
-          masterGain.gain.setTargetAtTime(v, ctx.currentTime, 0.05);
-        }
+        if (ctx && master) master.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
       }
 
-      // Fade the pad out before stopping/disconnecting so leaving "thinking"
-      // doesn't cut the oscillators mid-sample.
+      function setPhase(phase) {
+        if (phase === 'thinking') thinkPad();
+        else if (phase === 'answering') typeTick();
+        else if (phase === 'tools') toolTick();
+      }
+
+      function done() {
+        ensureCtx();
+        const t0 = ctx.currentTime + 0.05;
+        // Descending arpeggio: G5 -> E5 -> D5 -> C5, gentle triangle, quick decay.
+        [783.99, 659.25, 587.33, 523.25].forEach((f, i) => {
+          const t = t0 + i * 0.12;
+          const osc = ctx.createOscillator();
+          const g = ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = f;
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(0.12 * Math.max(0.3, currentIntensity), t + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
+          osc.connect(g).connect(master);
+          osc.start(t);
+          osc.stop(t + 0.6);
+        });
+      }
+
+      // --- thinking: a warm sustained pad with a slow swell ---
+      const PAD_PERIOD_MS = 1400;
+      let padTimer = null;
+      let padNoteCount = 0;
+
+      function thinkPad() {
+        ensureCtx();
+        if (padTimer) return; // already running
+        const spawnPad = () => {
+          if (!ctx) return;
+          // Sparse: ~70% chance per period to keep it calm.
+          if (Math.random() < 0.3) return;
+          const t = ctx.currentTime;
+          const base = SCALE_LOW[padNoteCount % SCALE_LOW.length];
+          padNoteCount++;
+          // Two slightly detuned oscillators for a warm chord tone.
+          [base, base * 1.5].forEach((f, idx) => {
+            const osc = ctx.createOscillator();
+            const g = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = f * (1 + (idx === 0 ? 0.003 : -0.003));
+            const peak = (idx === 0 ? 0.10 : 0.05) * Math.max(0.2, currentIntensity);
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.linearRampToValueAtTime(peak, t + 0.5);
+            g.gain.linearRampToValueAtTime(0.0001, t + 1.25);
+            const lp = ctx.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.frequency.value = 900;
+            osc.connect(lp).connect(g).connect(master);
+            osc.start(t);
+            osc.stop(t + 1.3);
+          });
+        };
+        spawnPad();
+        padTimer = setInterval(spawnPad, PAD_PERIOD_MS);
+      }
+
       function stopPad() {
-        if (!padOscA && !padOscB) return;
-        const now = ctx ? ctx.currentTime : 0;
-        if (padGain) {
-          try {
-            padGain.gain.cancelScheduledValues(now);
-            padGain.gain.setTargetAtTime(0, now, 0.05);
-          } catch (_) {}
-        }
-        for (const node of [padOscA, padOscB, padLfo]) {
-          try { node.stop(now + 0.3); } catch (_) {}
-        }
-        const oscA = padOscA, oscB = padOscB, gain = padGain;
-        const lfo = padLfo, lfoGain = padLfoGain;
-        padOscA = null; padOscB = null; padGain = null;
-        padLfo = null; padLfoGain = null;
-        setTimeout(() => {
-          for (const node of [oscA, oscB, gain, lfo, lfoGain]) {
-            try { node.disconnect(); } catch (_) {}
-          }
-        }, 360);
+        if (padTimer) { clearInterval(padTimer); padTimer = null; }
       }
 
-      // Very quiet shimmering bed for "thinking": two softly detuned
-      // mid-range oscillators passed through a low-pass filter, with a slow
-      // amplitude swell. Kept well below the old level — the continuous pad
-      // is what fatigues the ear over long thinking blocks.
-      function startThinkingPad() {
-        const c = ensureContext();
-        stopPad();
+      // --- answering: short typewriter-like click bursts ---
+      const TYPE_PERIOD_MS = 75;
+      let typeTimer = null;
+      let noiseBuffer = null;
 
-        padGain = c.createGain();
-        padGain.gain.value = 0;
-        padGain.gain.setTargetAtTime(0.009 * intensity, c.currentTime, 0.6);
-
-        const filter = c.createBiquadFilter();
-        filter.type = 'lowpass';
-        filter.frequency.value = 900;
-        filter.Q.value = 0.4;
-
-        padOscA = c.createOscillator();
-        padOscA.type = 'sine';
-        padOscA.frequency.value = 293.66; // D4
-        padOscA.detune.value = -6;
-
-        padOscB = c.createOscillator();
-        padOscB.type = 'triangle';
-        padOscB.frequency.value = 440.0; // A4
-        padOscB.detune.value = 7;
-
-        padLfo = c.createOscillator();
-        padLfo.frequency.value = 0.18;
-        padLfoGain = c.createGain();
-        padLfoGain.gain.value = 0.004 * intensity;
-
-        padLfo.connect(padLfoGain);
-        padLfoGain.connect(padGain.gain);
-        padOscA.connect(filter);
-        padOscB.connect(filter);
-        filter.connect(padGain);
-        padGain.connect(masterGain);
-
-        padOscA.start();
-        padOscB.start();
-        padLfo.start();
-      }
-
-      // Soft, sparse low note — a calm "hmm" while thinking.
-      function playThinkingNote() {
-        const c = ensureContext();
-        const osc = c.createOscillator();
-        const gain = c.createGain();
-        const scaleIdx = Math.floor(Math.random() * SCALE_LOW.length);
-        osc.frequency.value = SCALE_LOW[scaleIdx] * (1 + (Math.random() - 0.5) * 0.04);
-        osc.type = 'sine';
-        const now = c.currentTime;
-        gain.gain.setValueAtTime(0, now);
-        gain.gain.linearRampToValueAtTime(0.14 * intensity, now + 0.08);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
-        osc.connect(gain);
-        gain.connect(masterGain);
-        osc.start(now);
-        osc.stop(now + 0.8);
-      }
-
-      // Lazily build a short noise buffer for percussive clicks.
-      function getNoiseBuffer() {
-        const c = ensureContext();
-        if (!noiseBuffer) {
-          const len = Math.floor(c.sampleRate * 0.04);
-          noiseBuffer = c.createBuffer(1, len, c.sampleRate);
+      function getNoise() {
+        if (!noiseBuffer && ctx) {
+          const len = Math.floor(ctx.sampleRate * 0.03);
+          noiseBuffer = ctx.createBuffer(1, len, ctx.sampleRate);
           const data = noiseBuffer.getChannelData(0);
-          for (let i = 0; i < len; i++) {
-            // Sharp attack, fast exponential-ish decay — a key strike.
-            data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.5);
-          }
+          for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
         }
         return noiseBuffer;
       }
 
-      // Typewriter key click — short filtered noise burst with random pitch,
-      // fired rapidly while text streams. Mechanical, not tonal.
-      function playTypewriterClick() {
-        const c = ensureContext();
-        const source = c.createBufferSource();
-        source.buffer = getNoiseBuffer();
-        source.playbackRate.value = 0.85 + Math.random() * 0.5;
-        const filter = c.createBiquadFilter();
-        filter.type = 'bandpass';
-        filter.frequency.value = 2200 + Math.random() * 1800;
-        filter.Q.value = 1.2;
-        const gain = c.createGain();
-        const now = c.currentTime;
-        gain.gain.setValueAtTime(0.20 * intensity, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.035);
-        source.connect(filter);
-        filter.connect(gain);
-        gain.connect(masterGain);
-        source.start(now);
-        source.stop(now + 0.04);
+      function typeTick() {
+        ensureCtx();
+        if (typeTimer) return;
+        const spawnType = () => {
+          if (!ctx) return;
+          // Sparse clicks so it reads as typing, not machine-gun.
+          if (Math.random() < 0.45) return;
+          const t = ctx.currentTime;
+          const src = ctx.createBufferSource();
+          src.buffer = getNoise();
+          const bp = ctx.createBiquadFilter();
+          bp.type = 'bandpass';
+          bp.frequency.value = 2200 + Math.random() * 900;
+          bp.Q.value = 1.2;
+          const g = ctx.createGain();
+          const peak = 0.05 * Math.max(0.3, currentIntensity);
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(peak, t + 0.004);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+          src.connect(bp).connect(g).connect(master);
+          src.start(t);
+          src.stop(t + 0.04);
+        };
+        spawnType();
+        typeTimer = setInterval(spawnType, TYPE_PERIOD_MS);
       }
 
-      // Soft, rounded tick — gentle mechanical pulse while tools run,
-      // balanced with the thinking pad/note rather than harsh or loud.
-      function playToolTap() {
-        const c = ensureContext();
-        const osc = c.createOscillator();
-        const gain = c.createGain();
-        osc.frequency.value = 440;
+      function stopType() {
+        if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
+      }
+
+      // --- tools: a brief, higher sine tick ---
+      function toolTick() {
+        ensureCtx();
+        const t = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const g = ctx.createGain();
         osc.type = 'sine';
-        const now = c.currentTime;
-        gain.gain.setValueAtTime(0, now);
-        gain.gain.linearRampToValueAtTime(0.11 * intensity, now + 0.012);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
-        osc.connect(gain);
-        gain.connect(masterGain);
-        osc.start(now);
-        osc.stop(now + 0.14);
+        osc.frequency.value = 440;
+        const peak = 0.08 * Math.max(0.3, currentIntensity);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(peak, t + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+        osc.connect(g).connect(master);
+        osc.start(t);
+        osc.stop(t + 0.3);
       }
 
-      // Relaxed descending completion chime: G5, E5, D5, and C5. Each note
-      // pairs a triangle wave with a slightly detuned partner and runs them
-      // through a low 1100 Hz low-pass so only the fundamentals survive —
-      // warm and rounded instead of bright. A slow attack and the longer
-      // release keep the ending soft rather than tense; the lower peak gain
-      // compensates for the doubled source so it is not louder than before.
-      function playDoneChime() {
-        const c = ensureContext();
-        const now = c.currentTime;
-        const notes = [783.99, 659.25, 587.33, 523.25];
-        notes.forEach((freq, i) => {
-          const osc = c.createOscillator();
-          const oscWarm = c.createOscillator();
-          const filter = c.createBiquadFilter();
-          const gain = c.createGain();
-          osc.type = 'triangle';
-          osc.frequency.value = freq;
-          oscWarm.type = 'triangle';
-          oscWarm.frequency.value = freq;
-          oscWarm.detune.value = 6;
-          filter.type = 'lowpass';
-          filter.frequency.value = 1100;
-          filter.Q.value = 0.3;
-          const t = now + i * 0.135;
-          gain.gain.setValueAtTime(0, t);
-          gain.gain.linearRampToValueAtTime(0.18 * intensity, t + 0.045);
-          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.65);
-          osc.connect(filter);
-          oscWarm.connect(filter);
-          filter.connect(gain);
-          gain.connect(masterGain);
-          osc.start(t);
-          osc.stop(t + 0.7);
-          oscWarm.start(t);
-          oscWarm.stop(t + 0.7);
-        });
-      }
-
-      function clearTimer() {
-        if (timer) { clearInterval(timer); timer = null; }
-      }
-
-      // Start the audio for a phase. Only called when the AudioContext is
-      // running, so nothing is scheduled while suspended (scheduling during
-      // suspension and bursting on resume was a pop source).
-      function startPhaseAudio(phase, prev) {
-        // Belt and braces: no interval may survive a phase change, even if a
-        // caller forgot to clear it (a leaked interval keeps firing notes
-        // indefinitely).
-        clearTimer();
-        if (phase === 'thinking') {
-          startThinkingPad();
-          timer = setInterval(playThinkingNote, 1400);
-        } else if (phase === 'answering') {
-          stopPad();
-          playTypewriterClick();
-          timer = setInterval(playTypewriterClick, 75);
-        } else if (phase === 'tools') {
-          stopPad();
-          playToolTap();
-          timer = setInterval(playToolTap, 300);
-        } else if (phase === 'idle') {
-          stopPad();
-          if (prev !== 'idle') playDoneChime();
-        }
-      }
-
-      // Apply the deferred transition once the context is running, but only
-      // if it is still the current phase. If the UI moved on in the meantime
-      // (e.g. the turn ended while the context was suspended), the pending
-      // transition is stale: starting it would create a pad/timer that no
-      // future setPhase can stop, because currentPhase already matches the
-      // UI phase.
-      function consumePendingPhase() {
-        if (!pendingPhase) return;
-        if (!ctx || ctx.state !== 'running') return;
-        const pending = pendingPhase;
-        pendingPhase = null;
-        if (pending.phase !== currentPhase) return;
-        startPhaseAudio(pending.phase, pending.prev);
-      }
-
-      function setPhase(phase) {
-        if (phase === currentPhase) return;
-        const prev = currentPhase;
-        currentPhase = phase;
-        clearTimer();
-        // Defer audio until the context is actually running (user gesture).
-        // Keep prev with the pending record so a deferred 'idle' still plays
-        // the done-chime when it is finally applied.
-        if (!ctx || ctx.state !== 'running') {
-          pendingPhase = { phase, prev };
-          return;
-        }
-        startPhaseAudio(phase, prev);
-      }
-
-      function onUserInteraction() {
-        ensureContext();
-        consumePendingPhase();
+      // Stop all ambient loops when leaving a phase.
+      function stopAllLoops() {
+        stopPad();
+        stopType();
       }
 
       return {
-        setPhase,
+        resume() { ensureCtx(); },
         setVolume,
-        getVolume: () => currentVolume,
-        dispose: () => {
-          clearTimer();
-          stopPad();
-          pendingPhase = null;
-          if (ctx) {
-            if (onContextState) {
-              try { ctx.removeEventListener('statechange', onContextState); } catch (_) {}
-              onContextState = null;
-            }
-            // Release the AudioContext: the component remounts per session,
-            // and unclosed contexts accumulate until the browser refuses to
-            // create new ones.
-            try { Promise.resolve(ctx.close()).catch(() => {}); } catch (_) {}
-            ctx = null;
-            masterGain = null;
-          }
+        setPhase(phase) {
+          stopAllLoops();
+          if (phase === 'thinking') thinkPad();
+          else if (phase === 'answering') typeTick();
+          else if (phase === 'tools') toolTick();
         },
-        onUserInteraction,
+        done,
+        dispose() {
+          stopAllLoops();
+          if (ctx) { ctx.close(); ctx = null; master = null; }
+        },
       };
     }
 
-    // --- Volume popover ---
-    function VolumePopover({ volume, onChange }) {
-      const pct = Math.round(volume * 100);
+    // --- Phase colours & labels (coloured like the previous pill) ---
+    const PHASE_COLOR = {
+      thinking: '#2dd4bf',
+      tools: '#e8a838',
+      answering: '#5ee6a8',
+      idle: '#555',
+    };
+    const PHASE_LABEL = {
+      thinking: 'Thinking',
+      tools: 'Using tools',
+      answering: 'Answering',
+      idle: 'Chirp',
+    };
 
-      return h('div', {
-        style: {
-          position: 'absolute',
-          bottom: 'calc(100% + 8px)',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px',
-          padding: '8px 12px',
-          borderRadius: '10px',
-          backgroundColor: 'var(--dsw-alias-bg-raised, rgba(30,30,30,0.95))',
-          border: '1px solid var(--dsw-alias-border-base, rgba(128,128,128,0.25))',
-          boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-          zIndex: 100,
-          backdropFilter: 'blur(8px)',
-        },
-      },
-        // Speaker icon
-        h('svg', {
-          width: '16', height: '16', viewBox: '0 0 24 24', fill: 'none',
-          stroke: 'var(--dsw-alias-label-primary, #ccc)', strokeWidth: '2',
-          strokeLinecap: 'round', strokeLinejoin: 'round',
-        },
-          h('polygon', { points: '11 5 6 9 2 9 2 15 6 15 11 19 11 5' }),
-          pct > 0 ? h('path', { d: 'M15.54 8.46a5 5 0 0 1 0 7.07' }) : null,
-          pct > 50 ? h('path', { d: 'M19.07 4.93a10 10 0 0 1 0 14.14' }) : null
-        ),
-        h('input', {
-          type: 'range',
-          min: '0',
-          max: '100',
-          value: pct,
-          onChange: (e) => onChange(parseInt(e.target.value, 10) / 100),
+    // --- Volume popover ---
+    function VolumePopover({ initialVolume, onCommit, onClose, anchor }) {
+      const [vol, setVol] = React.useState(initialVolume);
+      const ref = React.useRef(null);
+
+      React.useEffect(() => {
+        const onDocMouseDown = (e) => {
+          if (ref.current && !ref.current.contains(e.target)) onClose();
+        };
+        const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('mousedown', onDocMouseDown);
+        document.addEventListener('keydown', onKey);
+        return () => {
+          document.removeEventListener('mousedown', onDocMouseDown);
+          document.removeEventListener('keydown', onKey);
+        };
+      }, [onClose]);
+
+      const pct = Math.round(vol * 100);
+
+      // Position the panel anchored to the icon (above it, right-aligned to the
+      // icon's right edge). Fall back to a fixed corner if no anchor is available.
+      const popoverStyle = {
+        position: 'fixed',
+        zIndex: 9999,
+        width: 210,
+        background: 'var(--dsw-specific-menu)',
+        border: '1px solid var(--dsw-alias-border-l3)',
+        borderRadius: 10,
+        boxShadow: '0 8px 28px rgba(0,0,0,0.28)',
+        padding: '12px 14px',
+        display: 'flex', flexDirection: 'column', gap: 10,
+      };
+      if (anchor) {
+        popoverStyle.right = Math.round(window.innerWidth - anchor.right);
+        popoverStyle.bottom = Math.round(window.innerHeight - anchor.top + 8);
+      } else {
+        popoverStyle.bottom = 64;
+        popoverStyle.left = 20;
+      }
+
+      const speakerIcon = h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, 'aria-hidden': true },
+        h('path', { d: 'M8 2.667 4.417 5.5H2.667A.667.667 0 0 0 2 6.167v3.666a.667.667 0 0 0 .667.667h1.75L8 13.333V2.667Z', fill: 'currentColor' }),
+        h('path', { d: 'M10.467 5.72A3.3 3.3 0 0 1 10.467 10.28L11.12 10.9a4.36 4.36 0 0 0 0-6.36l-.653.667Z', fill: 'currentColor' }),
+      );
+
+      return h(React.Fragment, null,
+        h('div', {
+          onMouseDown: (e) => e.stopPropagation(),
+          onClick: (e) => e.stopPropagation(),
           style: {
-            width: '100px',
-            height: '4px',
-            appearance: 'none',
-            WebkitAppearance: 'none',
-            backgroundColor: 'var(--dsw-alias-border-base, rgba(128,128,128,0.3))',
-            borderRadius: '2px',
-            outline: 'none',
-            cursor: 'pointer',
-            accentColor: '#7ec8e3',
+            position: 'fixed', inset: 0, zIndex: 9998,
           },
+          onClick: onClose,
         }),
-        h('span', {
-          style: {
-            fontSize: '11px',
-            fontWeight: 500,
-            color: 'var(--dsw-alias-label-secondary, #aaa)',
-            minWidth: '32px',
-            textAlign: 'right',
-            fontVariantNumeric: 'tabular-nums',
-          },
-        }, pct + '%')
+        h('div', {
+          ref,
+          role: 'dialog',
+          'aria-label': 'Chirp volume',
+          style: popoverStyle,
+        },
+          h('div', {
+            style: {
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              color: 'var(--dsw-alias-label-secondary)', fontSize: 12, fontWeight: 600,
+              letterSpacing: '0.02em',
+            },
+          }, h('span', null, 'Chirp volume'), h('span', { style: { color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' } }, pct + '%')),
+          h('input', {
+            type: 'range', min: 0, max: 100, step: 1,
+            value: pct,
+            onChange: (e) => setVol(parseInt(e.target.value, 10) / 100),
+            onMouseUp: () => onCommit(vol),
+            onTouchEnd: () => onCommit(vol),
+            onKeyUp: (e) => { if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') onCommit(vol); },
+            style: { width: '100%', accentColor: 'var(--dsw-alias-brand-primary)', cursor: 'pointer' },
+          }),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 } },
+            speakerIcon,
+            h('span', null, 'Released on mouse-up'),
+          ),
+        ),
       );
     }
 
-    // --- Component ---
-    function AgentChirp(props) {
-      const { useProjection, useConversation, useSessionStatus, sessionId } = props;
+    // Inline style for the plugin's own deep-dive indicator element.
+    const INDICATOR_CSS =
+      'display:none;gap:6px;align-items:center;' +
+      'font-size:calc(var(--dsh-content-font-size,14px) - 2px);' +
+      'line-height:calc(22px + var(--dsh-content-font-delta, 0px));' +
+      'color:var(--dsw-alias-label-deep-diving);' +
+      'font-variant-numeric:tabular-nums;margin:6px 0 8px;';
 
+    function AgentChirp({ useProjection, useConversation, useSessionStatus, sessionId }) {
       const projection = useProjection('agentChirp');
-      const durablePhase = projection ? projection.phase : 'idle';
-      const configVolume = projection ? projection.volume : 0.25;
-      const intensity = projection ? projection.intensity : 0.7;
-      const enabled = projection ? projection.enabled : true;
-
-      // Real-time turn activity from the unified session status. `running`
-      // flips true at turn start and false at turn end as soon as the
-      // gateway reports it — the same signal the harness's own "Deep
-      // diving" indicator uses — so sounds start/stop with the actual turn
-      // instead of waiting for durable projection commits.
-      const running = useSessionStatus((status) => {
-        if (!sessionId) return false;
-        const entry = status.get(sessionId);
-        return !!entry && entry.running === true;
-      });
-
-      // Best-effort live phase from the chat view's streaming partial. While
-      // a turn is running, the last block kind of the exposed partial
-      // reflects what the model is doing right now (reasoning → thinking,
-      // text → answering, tool-call → tools). It is consulted before the
-      // durable projection, but ONLY while `running` is true: the view
-      // retains the last partial after the turn ends, so outside a turn it
-      // is stale and must not drive the phase.
+      const running = useSessionStatus((s) => s.get(sessionId)?.running === true);
       const liveBlockKind = useConversation((conv) => {
-        const chat = conv && conv.views ? conv.views.get('chat') : undefined;
-        const partial = chat && chat.legacy ? chat.legacy.partial : null;
-        if (!partial || !partial.blocks || partial.blocks.length === 0) return null;
-        return partial.blocks[partial.blocks.length - 1].kind;
+        if (!conv || !conv.blocks || conv.blocks.length === 0) return null;
+        const last = conv.blocks[conv.blocks.length - 1];
+        return last.partial ? last.kind : null;
       });
 
-      // Volume: user-adjustable, persisted in localStorage.
-      const [volume, setVolume] = React.useState(() => readStoredVolume(configVolume));
-      const [popoverOpen, setPopoverOpen] = React.useState(false);
+      const enabled = projection?.enabled !== false;
+      const baseVolume = projection?.volume ?? 0.25;
+      const intensity = projection?.intensity ?? 0.7;
+      const durablePhase = projection?.phase ?? 'idle';
+      const effectivePhase = !enabled || !running ? 'idle'
+        : liveBlockKind === 'reasoning' ? 'thinking'
+        : liveBlockKind === 'text' ? 'answering'
+        : liveBlockKind === 'tool-call' ? 'tools'
+        : durablePhase;
 
-      const engineRef = React.useRef(null);
-      const wrapperRef = React.useRef(null);
-      const enabledRef = React.useRef(enabled);
-      enabledRef.current = enabled;
-
-      // When config volume changes (e.g. plugin reconfigured), sync if user
-      // hasn't overridden it.
-      React.useEffect(() => {
-        setVolume(readStoredVolume(configVolume));
-      }, [configVolume]);
-
-      // Keep the latest volume in a ref so the engine-creation effect (which
-      // runs once) can read it without depending on it.
+      const [volume, setVolume] = React.useState(() => readStoredVolume(baseVolume));
       const volumeRef = React.useRef(volume);
       volumeRef.current = volume;
 
-      // Close the popover on outside click (the wrapper contains both the pill
-      // and the popover, so clicks on either are ignored).
+      const [popoverOpen, setPopoverOpen] = React.useState(false);
+      const [popoverAnchor, setPopoverAnchor] = React.useState(null);
+      const pillRef = React.useRef(null);
+
+      const engineRef = React.useRef(null);
+      const lastPhaseRef = React.useRef('idle');
       React.useEffect(() => {
-        if (!popoverOpen) return;
-        function handleOutsideClick(e) {
-          if (wrapperRef.current && !wrapperRef.current.contains(e.target)) {
-            setPopoverOpen(false);
+        if (!engineRef.current) {
+          engineRef.current = createAudioEngine(volumeRef.current, intensity);
+        }
+        const phase = effectivePhase;
+        if (phase !== lastPhaseRef.current) {
+          if (lastPhaseRef.current !== 'idle' && phase === 'idle') engineRef.current.done();
+          engineRef.current.setPhase(phase);
+          lastPhaseRef.current = phase;
+        }
+      }, [effectivePhase, intensity]);
+      React.useEffect(() => () => { engineRef.current?.dispose(); engineRef.current = null; }, []);
+
+      // --- Turn-timing tracking for the deep-dive indicator ---
+      const turnStartRef = React.useRef(null);
+      const persistedDurationRef = React.useRef(null);
+      const runningRef = React.useRef(running);
+      runningRef.current = running;
+      const phaseRef = React.useRef(effectivePhase);
+      phaseRef.current = effectivePhase;
+      const enabledRef = React.useRef(enabled);
+      enabledRef.current = enabled;
+
+      React.useEffect(() => {
+        if (running) {
+          turnStartRef.current = Date.now();
+          persistedDurationRef.current = null;
+        } else if (turnStartRef.current !== null) {
+          persistedDurationRef.current = Date.now() - turnStartRef.current;
+          turnStartRef.current = null;
+        }
+      }, [running]);
+
+      // --- Deep-dive indicator rendered at the chat tail ---
+      React.useEffect(() => {
+        // Hide the core deep-dive indicator (we render our own) when enabled.
+        let tag = document.getElementById(HIDE_CSS_ID);
+        if (!tag) {
+          tag = document.createElement('style');
+          tag.id = HIDE_CSS_ID;
+          document.head.appendChild(tag);
+        }
+        tag.textContent = enabledRef.current
+          ? CORE_RUNNING_SELECTOR + '{display:none !important;}'
+          : '';
+
+        let indicatorEl = null;
+        let retryTimer = null;
+        let interval = null;
+
+        function makeSpan(attr) {
+          const s = document.createElement('span');
+          s.setAttribute(attr, '');
+          return s;
+        }
+
+        function appendIndicator() {
+          const column = document.querySelector(CHAT_COLUMN_SELECTOR);
+          if (!column) return false;
+          indicatorEl = document.createElement('div');
+          indicatorEl.setAttribute(INDICATOR_ATTR, '');
+          indicatorEl.style.cssText = INDICATOR_CSS;
+          indicatorEl.appendChild(makeSpan('data-activity'));
+          indicatorEl.appendChild(makeSpan('data-time'));
+          column.appendChild(indicatorEl);
+          return true;
+        }
+
+        function updateIndicator() {
+          if (!indicatorEl || !indicatorEl.isConnected) {
+            // React removed it or the column was replaced (session switch).
+            appendIndicator();
+            if (!indicatorEl) return;
           }
+          if (!enabledRef.current) { indicatorEl.style.display = 'none'; return; }
+          const isRunning = runningRef.current;
+          const turnStart = turnStartRef.current;
+          const persisted = persistedDurationRef.current;
+          if (!isRunning && persisted === null) {
+            indicatorEl.style.display = 'none';
+            return;
+          }
+          indicatorEl.style.display = 'inline-flex';
+          const ms = isRunning ? Date.now() - turnStart : persisted;
+          const duration = formatDuration(ms);
+          const activityEl = indicatorEl.querySelector('[data-activity]');
+          const timeEl = indicatorEl.querySelector('[data-time]');
+          if (isRunning) {
+            const phase = phaseRef.current;
+            activityEl.textContent = PHASE_LABEL[phase];
+            activityEl.style.color = PHASE_COLOR[phase];
+            activityEl.style.display = '';
+          } else {
+            activityEl.style.display = 'none';
+          }
+          timeEl.textContent = duration + ' on this turn';
         }
-        document.addEventListener('mousedown', handleOutsideClick);
-        return () => document.removeEventListener('mousedown', handleOutsideClick);
-      }, [popoverOpen]);
 
-      React.useEffect(() => {
-        const engine = createAudioEngine(volumeRef.current, intensity);
-        engineRef.current = engine;
-        document.addEventListener('click', engine.onUserInteraction);
-        document.addEventListener('keydown', engine.onUserInteraction);
+        if (!appendIndicator()) {
+          retryTimer = setInterval(() => {
+            if (appendIndicator()) clearInterval(retryTimer);
+          }, 100);
+        }
+        interval = setInterval(updateIndicator, 500);
+        updateIndicator();
+
         return () => {
-          document.removeEventListener('click', engine.onUserInteraction);
-          document.removeEventListener('keydown', engine.onUserInteraction);
-          engine.dispose();
-          engineRef.current = null;
+          if (retryTimer) clearInterval(retryTimer);
+          if (interval) clearInterval(interval);
+          if (indicatorEl) indicatorEl.remove();
+          indicatorEl = null;
         };
-      }, [intensity]);
+      }, [sessionId]);
 
-      // Apply volume changes to the running engine without recreating it
-      // (so an active thinking pad doesn't restart mid-drag).
-      React.useEffect(() => {
-        if (engineRef.current) {
-          engineRef.current.setVolume(volume);
+      // --- Requirement 1: static volume icon ---
+      const handleClick = () => {
+        if (!popoverOpen) {
+          engineRef.current?.resume();
+          if (pillRef.current) setPopoverAnchor(pillRef.current.getBoundingClientRect());
+          setPopoverOpen(true);
         }
-      }, [volume]);
-
-      // Effective phase, in priority order:
-      //  0. Idle — while no turn is running, sounds stop immediately,
-      //     without waiting for a durable turn/end commit. This MUST come
-      //     before the live-partial check: the conversation view retains
-      //     the last streamed partial after the turn ends (e.g. a final
-      //     reasoning block), so consulting it while idle would pin the
-      //     phase to 'thinking' and the pad would keep playing forever.
-      //  1. Live partial block kind — real-time thinking/answering/tools
-      //     while a turn is running and the stream is exposed through the
-      //     conversation views.
-      //  2. Durable projection phase — fallback while running.
-      let effectivePhase;
-      if (!enabled || !running) {
-        effectivePhase = 'idle';
-      } else if (liveBlockKind === 'reasoning') {
-        effectivePhase = 'thinking';
-      } else if (liveBlockKind === 'text') {
-        effectivePhase = 'answering';
-      } else if (liveBlockKind === 'tool-call') {
-        effectivePhase = 'tools';
-      } else {
-        effectivePhase = durablePhase;
-      }
-
-      React.useEffect(() => {
-        if (engineRef.current) {
-          engineRef.current.setPhase(effectivePhase);
-        }
-      }, [effectivePhase]);
-
-      const phaseLabel = effectivePhase === 'thinking' ? 'thinking'
-        : effectivePhase === 'tools' ? 'using tools'
-        : effectivePhase === 'answering' ? 'answering'
-        : 'chirp';
-      const barColor = effectivePhase === 'tools' ? '#e8a838'
-        : effectivePhase === 'answering' ? '#5ee6a8'
-        : effectivePhase === 'thinking' ? '#7ec8e3'
-        : '#555';
-
-      function handleVolumeChange(v) {
+      };
+      const commitVolume = (v) => {
         setVolume(v);
-        storeVolume(v);
-      }
+        try { localStorage.setItem(VOLUME_STORAGE_KEY, String(v)); } catch {}
+        engineRef.current?.setVolume(v);
+        setPopoverOpen(false);
+      };
 
-      function handlePillClick(e) {
-        e.stopPropagation();
-        setPopoverOpen((open) => !open);
-      }
+      const speakerIcon = h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, 'aria-hidden': true },
+        h('path', { d: 'M8 2.667 4.417 5.5H2.667A.667.667 0 0 0 2 6.167v3.666a.667.667 0 0 0 .667.667h1.75L8 13.333V2.667Z', fill: 'currentColor' }),
+        h('path', { d: 'M10.467 5.72A3.3 3.3 0 0 1 10.467 10.28L11.12 10.9a4.36 4.36 0 0 0 0-6.36l-.653.667Z', fill: 'currentColor' }),
+      );
 
       return h('div', {
-        ref: wrapperRef,
-        style: { position: 'relative', display: 'inline-flex' },
-      },
-        h('div', {
-          onClick: handlePillClick,
-          style: {
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '6px',
-            padding: '4px 10px',
-            borderRadius: '12px',
-            backgroundColor: effectivePhase === 'idle' ? 'transparent' : 'var(--dsw-alias-bg-base, rgba(128,128,128,0.1))',
-            border: '1px solid ' + (effectivePhase === 'idle' ? 'transparent' : barColor + '44'),
-            transition: 'all 0.3s ease',
-            cursor: 'pointer',
-            userSelect: 'none',
-          },
-          'aria-label': 'Agent activity: ' + phaseLabel + '. Click to adjust volume.',
-          title: 'Agent Chirp — ' + phaseLabel + ' (click to adjust volume)',
+        ref: pillRef,
+        role: 'button',
+        tabIndex: 0,
+        'aria-label': 'Agent chirp volume',
+        onClick: handleClick,
+        onKeyDown: (e) => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleClick(); }
         },
-          h('div', {
-            style: { display: 'flex', alignItems: 'flex-end', gap: '2px', height: '14px' },
-          },
-            [0, 1, 2].map((i) =>
-              h('div', {
-                key: i,
-                style: {
-                  width: '4px',
-                  height: effectivePhase === 'idle' ? '5px' : (7 + i * 3) + 'px',
-                  backgroundColor: barColor,
-                  borderRadius: '2px',
-                  transition: 'height 0.3s ease, background-color 0.3s ease',
-                  animation: effectivePhase !== 'idle' ? 'chirp-bar ' + (0.6 + i * 0.15) + 's ease-in-out infinite alternate' : 'none',
-                },
-              })
-            )
-          ),
-          h('span', {
-            style: {
-              fontSize: '11px',
-              fontWeight: 500,
-              color: effectivePhase === 'idle' ? 'var(--dsw-alias-label-tertiary, #888)' : barColor,
-              letterSpacing: '0.3px',
-              textTransform: 'uppercase',
-            },
-          }, phaseLabel)
-        ),
-        popoverOpen
-          ? h(VolumePopover, {
-              volume,
-              onChange: handleVolumeChange,
-            })
-          : null
+        style: {
+          position: 'relative',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: 28,
+          height: 28,
+          borderRadius: 7,
+          color: 'var(--dsw-alias-label-secondary)',
+          cursor: 'pointer',
+          border: 'none',
+          background: 'transparent',
+          padding: 0,
+        },
+      },
+        speakerIcon,
+        popoverOpen && h(VolumePopover, {
+          initialVolume: volume,
+          onCommit: commitVolume,
+          onClose: () => setPopoverOpen(false),
+          anchor: popoverAnchor,
+        }),
       );
     }
 
-    function StyleInjector() {
-      const css = [
-        '@keyframes chirp-bar { 0% { transform: scaleY(0.6); } 100% { transform: scaleY(1.2); } }',
-        'input[type="range"]::-webkit-slider-thumb {',
-        '  -webkit-appearance: none;',
-        '  appearance: none;',
-        '  width: 12px;',
-        '  height: 12px;',
-        '  border-radius: 50%;',
-        '  background: #7ec8e3;',
-        '  cursor: pointer;',
-        '  border: none;',
-        '}',
-        'input[type="range"]::-moz-range-thumb {',
-        '  width: 12px;',
-        '  height: 12px;',
-        '  border-radius: 50%;',
-        '  background: #7ec8e3;',
-        '  cursor: pointer;',
-        '  border: none;',
-        '}',
-      ].join('\n');
-      return h('style', { dangerouslySetInnerHTML: { __html: css } });
-    }
-
     function AgentChirpWrapper(props) {
-      return h(React.Fragment, null, h(StyleInjector, null), h(AgentChirp, props));
+      try {
+        return h(AgentChirp, props);
+      } catch (err) {
+        console.warn('[agent-chirp] render failed:', err);
+        return null;
+      }
     }
 
     return {
