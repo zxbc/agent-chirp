@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.0] - 2026-11-01
+
+### Changed
+- **The tool-use sound is now a random sci-fi "robotic murmur".** The old
+  sound was a fixed 440 Hz sine tick every 300 ms. It is replaced by a
+  rapid, irregular murmur: log-uniform pitch blips (300-1800 Hz) with random
+  upward/downward glides, low 80-220 Hz rumble, and quick 2-4 note
+  "calculation" runs, all low-passed (1.5-4 kHz) so it reads as a robot doing
+  calculations without being abrasive. Ticks fire every 90 ms with a 40%
+  skip, so the rhythm is never metronomic.
+
 ## [1.3.0] - 2026-11-01
 
 ### Changed

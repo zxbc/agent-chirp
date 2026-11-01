@@ -1,6 +1,6 @@
 {
   "name": "@local/agent-chirp",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Gentle musical chirps while the DeepSeek Harness agent works — different sounds for thinking, answering, and tool use.",
   "license": "MIT",
   "repository": {

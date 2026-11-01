@@ -2,8 +2,9 @@
 
 Gentle musical chirps while your DeepSeek Harness agent works. Agent Chirp
 plays a different sound for each phase of an agent turn — a generated melody
-while the model thinks, mechanical typewriter clicks while it writes, soft
-ticks while tools run, and a bright arpeggio when the turn completes.
+while the model thinks, mechanical typewriter clicks while it writes, a
+sci-fi robotic murmur while tools run, and a bright arpeggio when the turn
+completes.
 
 ## Sounds
 
@@ -11,7 +12,7 @@ ticks while tools run, and a bright arpeggio when the turn completes.
 |---|---|---|
 | thinking | the model is reasoning | a generated short melody — a stepwise tune over a two-note bass, in a rotating set of modes and keys, with motifs, cadences, and occasional blue notes; see [docs/thinking-melody.md](docs/thinking-melody.md) |
 | answering | text is streaming in | mechanical typewriter key-clicks — short band-passed noise bursts, ~75 ms apart |
-| using tools | tool calls execute | soft, rounded 440 Hz sine ticks every ~300 ms |
+| using tools | tool calls execute | a random, rapid sci-fi "robotic murmur" — log-uniform pitch blips with glides, low rumble, and quick calc-runs, all low-passed |
 | done | the turn ends | a soft descending four-note bell arpeggio (G5–E5–D5–C5) — detuned sine voices through a lowpass, long overlapping tails, and a reverb-like wash of decaying, darkening echoes |
 
 ## The pill

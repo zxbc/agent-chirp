@@ -510,26 +510,81 @@ window.__ModuleLoader__.load({
         if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
       }
 
-      // --- tools: a brief, higher sine tick, repeated while tools run ---
-      const TOOL_PERIOD_MS = 300;
+      // --- tools: a random, rapid sci-fi "robotic murmur" while tools run ---
+      const TOOL_PERIOD_MS = 90;
       let toolTimer = null;
+      function spawnMurmur() {
+        if (!ctx) return;
+        const t = ctx.currentTime;
+        const base = 0.06 * Math.max(0.3, currentIntensity) * currentVolumes.tools;
+        if (base <= 0.0001) return;
+        const blip = () => {
+          const f0 = 300 * Math.pow(6, Math.random()); // 300-1800 Hz, log-uniform
+          const sweep = Math.random() < 0.5 ? 0.6 : 1.6; // glide down or up
+          const dur = 0.03 + Math.random() * 0.09; // 30-120 ms
+          const osc = ctx.createOscillator();
+          osc.type = Math.random() < 0.7 ? 'sine' : 'triangle';
+          osc.frequency.setValueAtTime(f0, t);
+          osc.frequency.exponentialRampToValueAtTime(Math.max(60, f0 * sweep), t + dur);
+          const lp = ctx.createBiquadFilter();
+          lp.type = 'lowpass';
+          lp.frequency.value = 1500 + Math.random() * 2500;
+          lp.Q.value = 0.6;
+          const g = ctx.createGain();
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(base, t + 0.004);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+          osc.connect(lp).connect(g).connect(master);
+          osc.start(t);
+          osc.stop(t + dur + 0.02);
+        };
+        const murmur = () => {
+          const f0 = 80 + Math.random() * 140; // 80-220 Hz low rumble
+          const dur = 0.08 + Math.random() * 0.17; // 80-250 ms
+          const osc = ctx.createOscillator();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(f0, t);
+          osc.frequency.linearRampToValueAtTime(f0 * (0.8 + Math.random() * 0.5), t + dur);
+          const g = ctx.createGain();
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(base * 0.8, t + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+          osc.connect(g).connect(master);
+          osc.start(t);
+          osc.stop(t + dur + 0.02);
+        };
+        const calcRun = () => {
+          const n = 2 + Math.floor(Math.random() * 3); // 2-4 notes
+          const up = Math.random() < 0.5;
+          let f = 400 + Math.random() * 800;
+          for (let i = 0; i < n; i++) {
+            const nt = t + i * (0.04 + Math.random() * 0.04);
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.value = f;
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0001, nt);
+            g.gain.exponentialRampToValueAtTime(base * 0.9, nt + 0.003);
+            g.gain.exponentialRampToValueAtTime(0.0001, nt + 0.06);
+            osc.connect(g).connect(master);
+            osc.start(nt);
+            osc.stop(nt + 0.08);
+            f *= up ? 1.1 + Math.random() * 0.4 : 1 / (1.1 + Math.random() * 0.4);
+          }
+        };
+        const kind = Math.random();
+        if (kind < 0.62) blip();
+        else if (kind < 0.82) murmur();
+        else calcRun();
+      }
       function toolTick() {
         ensureCtx();
         if (toolTimer) return; // already running
         const spawnTool = () => {
           if (!ctx) return;
-          const t = ctx.currentTime;
-          const osc = ctx.createOscillator();
-          const g = ctx.createGain();
-          osc.type = 'sine';
-          osc.frequency.value = 440;
-          const peak = 0.08 * Math.max(0.3, currentIntensity) * currentVolumes.tools;
-          g.gain.setValueAtTime(0.0001, t);
-          g.gain.exponentialRampToValueAtTime(peak, t + 0.01);
-          g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
-          osc.connect(g).connect(master);
-          osc.start(t);
-          osc.stop(t + 0.3);
+          // Irregular: skip most ticks so the murmur reads as random, not metronomic.
+          if (Math.random() < 0.4) return;
+          spawnMurmur();
         };
         spawnTool();
         toolTimer = setInterval(spawnTool, TOOL_PERIOD_MS);

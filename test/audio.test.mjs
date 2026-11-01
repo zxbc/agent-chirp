@@ -39,7 +39,7 @@ class MockGain extends MockNode {
   constructor() { super(); this.gain = new MockParam(0); }
 }
 class MockFilter extends MockNode {
-  constructor() { super(); this.type = 'lowpass'; this.frequency = new MockParam(0); }
+  constructor() { super(); this.type = 'lowpass'; this.frequency = new MockParam(0); this.Q = new MockParam(0); }
 }
 class MockCtx {
   constructor() {
@@ -150,6 +150,22 @@ try {
   check(chime.every((o) => o.nodes[0] && o.nodes[0].type === 'lowpass'), 'every chime voice must pass through a lowpass');
   check(chime.filter((o) => gainPeak(o) >= 0.09).length === 8, 'chime must have 8 main voices (2 per note)');
   check(chime.filter((o) => gainPeak(o) < 0.05).length === 12, 'chime must have 12 quiet echo voices');
+
+  // Tools phase: random sci-fi murmur — many ticks produce oscillators with
+  // frequencies in the murmur range, all reaching a gain node.
+  engine.setPhase('tools');
+  const beforeTools = ctx.oscs.length;
+  for (let i = 0; i < 40; i++) { ctx.currentTime += 0.09; intervalCb && intervalCb(); }
+  const tools = ctx.oscs.slice(beforeTools);
+  check(tools.length > 0, 'tools phase must schedule murmur oscillators');
+  for (const o of tools) {
+    check(o.frequency.value >= 60 && o.frequency.value <= 4200, `tool freq ${o.frequency.value} out of range`);
+    check(o.starts.length === 1 && o.stops.length === 1, 'tool osc must start and stop once');
+    let g = o.nodes[0];
+    while (g && !g.gain) g = g.nodes ? g.nodes[0] : null;
+    check(!!g, 'tool osc must reach a gain node');
+  }
+  engine.setPhase('idle');
 
   // Volume 0: melody events are skipped (peak guard).
   engine.setVolume('thinking', 0);
