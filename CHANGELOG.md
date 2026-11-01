@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.0] - 2026-11-01
+
+### Changed
+- **The done chime is now a soft bell arpeggio.** The old sound was four
+  triangle waves with a 20 ms attack and a 500 ms decay — brittle and
+  slightly abrasive. It is replaced by detuned sine pairs through a 3.2 kHz
+  lowpass with a 50 ms attack and a 1.65 s overlapping release, plus three
+  decaying, darkening echoes per note (2400/1600/1000 Hz lowpass) that fake a
+  reverb tail.
+
 ## [1.2.0] - 2026-11-01
 
 ### Changed

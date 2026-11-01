@@ -347,20 +347,51 @@ window.__ModuleLoader__.load({
       // Plays the descending done-chime. Caller must guarantee ctx is
       // non-null and running (setPhase/applyPending guard for this).
       function playDoneChime() {
+        const peak = 0.10 * Math.max(0.3, currentIntensity) * currentVolumes.done;
+        if (peak <= 0.0001) return;
         const t0 = ctx.currentTime + 0.05;
-        // Descending arpeggio: G5 -> E5 -> D5 -> C5, gentle triangle, quick decay.
-        [783.99, 659.25, 587.33, 523.25].forEach((f, i) => {
-          const t = t0 + i * 0.12;
-          const osc = ctx.createOscillator();
-          const g = ctx.createGain();
-          osc.type = 'triangle';
-          osc.frequency.value = f;
-          g.gain.setValueAtTime(0.0001, t);
-          g.gain.exponentialRampToValueAtTime(0.12 * Math.max(0.3, currentIntensity) * currentVolumes.done, t + 0.02);
-          g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
-          osc.connect(g).connect(master);
-          osc.start(t);
-          osc.stop(t + 0.6);
+        // Soft bell arpeggio: G5 -> E5 -> D5 -> C5. Each note is a detuned
+        // sine pair through a lowpass (no brittle triangle harmonics) with a
+        // slow 50 ms attack and a long overlapping release; three decaying,
+        // darkening echoes per note fake a reverb tail.
+        const NOTES = [783.99, 659.25, 587.33, 523.25];
+        const ECHO_DELTAS = [0.21, 0.42, 0.66];
+        const ECHO_GAIN = [0.30, 0.16, 0.08];
+        const ECHO_CUTOFF = [2400, 1600, 1000];
+        NOTES.forEach((f, i) => {
+          const t = t0 + i * 0.15;
+          for (const detune of [0, 4]) {
+            const osc = ctx.createOscillator();
+            const lp = ctx.createBiquadFilter();
+            const g = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = f;
+            osc.detune.value = detune;
+            lp.type = 'lowpass';
+            lp.frequency.value = 3200;
+            g.gain.setValueAtTime(0.0001, t);
+            g.gain.exponentialRampToValueAtTime(peak, t + 0.05);
+            g.gain.exponentialRampToValueAtTime(0.0001, t + 1.65);
+            osc.connect(lp).connect(g).connect(master);
+            osc.start(t);
+            osc.stop(t + 1.7);
+          }
+          ECHO_DELTAS.forEach((d, e) => {
+            const et = t + d + (Math.random() * 0.06 - 0.03);
+            const osc = ctx.createOscillator();
+            const lp = ctx.createBiquadFilter();
+            const g = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = f;
+            lp.type = 'lowpass';
+            lp.frequency.value = ECHO_CUTOFF[e];
+            g.gain.setValueAtTime(0.0001, et);
+            g.gain.exponentialRampToValueAtTime(peak * ECHO_GAIN[e], et + 0.04);
+            g.gain.exponentialRampToValueAtTime(0.0001, et + 1.24);
+            osc.connect(lp).connect(g).connect(master);
+            osc.start(et);
+            osc.stop(et + 1.3);
+          });
         });
       }
 

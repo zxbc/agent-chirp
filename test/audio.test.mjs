@@ -134,11 +134,22 @@ try {
   intervalCb && intervalCb();
   check(ctx.oscs.length === beforeTick, 'idle phase must not schedule new pad notes');
 
-  // Done chime: 4 triangle notes.
+  // Done chime: soft bell arpeggio — 4 notes x (2 detuned main voices + 3
+  // decaying echoes) = 20 sine oscillators, all lowpassed.
+  const gainPeak = (o) => {
+    let g = o.nodes[0];
+    while (g && !g.gain) g = g.nodes ? g.nodes[0] : null;
+    return g ? Math.max(...g.gain.ramps.map((r) => r[0])) : 0;
+  };
   engine.done();
   const chime = ctx.oscs.slice(beforeTick);
-  check(chime.length === 4, `done chime should use 4 oscillators, got ${chime.length}`);
-  check(chime.every((o) => o.type === 'triangle'), 'chime must use triangle waves');
+  check(chime.length === 20, `done chime should use 20 oscillators, got ${chime.length}`);
+  check(chime.every((o) => o.type === 'sine'), 'chime must use sine waves');
+  const NOTES = [783.99, 659.25, 587.33, 523.25];
+  check(chime.every((o) => NOTES.includes(o.frequency.value)), 'chime frequencies must be the arpeggio notes');
+  check(chime.every((o) => o.nodes[0] && o.nodes[0].type === 'lowpass'), 'every chime voice must pass through a lowpass');
+  check(chime.filter((o) => gainPeak(o) >= 0.09).length === 8, 'chime must have 8 main voices (2 per note)');
+  check(chime.filter((o) => gainPeak(o) < 0.05).length === 12, 'chime must have 12 quiet echo voices');
 
   // Volume 0: melody events are skipped (peak guard).
   engine.setVolume('thinking', 0);

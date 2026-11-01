@@ -12,7 +12,7 @@ ticks while tools run, and a bright arpeggio when the turn completes.
 | thinking | the model is reasoning | a generated short melody — a stepwise tune over a two-note bass, in a rotating set of modes and keys, with motifs, cadences, and occasional blue notes; see [docs/thinking-melody.md](docs/thinking-melody.md) |
 | answering | text is streaming in | mechanical typewriter key-clicks — short band-passed noise bursts, ~75 ms apart |
 | using tools | tool calls execute | soft, rounded 440 Hz sine ticks every ~300 ms |
-| done | the turn ends | a soft descending four-note chime (G5–E5–D5–C5) with filtered triangle waves |
+| done | the turn ends | a soft descending four-note bell arpeggio (G5–E5–D5–C5) — detuned sine voices through a lowpass, long overlapping tails, and a reverb-like wash of decaying, darkening echoes |
 
 ## The pill
 
