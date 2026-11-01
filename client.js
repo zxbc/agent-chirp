@@ -4,10 +4,250 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    // --- Pentatonic scales ---
-    // Low, warm scale for thinking; bright high scale for answering.
-    const SCALE_LOW = [196.0, 220.0, 261.63, 293.66, 329.63, 392.0];
-    const SCALE_HIGH = [523.25, 587.33, 659.25, 783.99, 880.0, 1046.5];
+    // --- The Muse: a small procedural composer for the thinking sound ---
+    // It generates a different, musically coherent melody every phrase so the
+    // sound never loops. Full design: docs/thinking-melody.md
+    const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const midiName = (m) => NOTE_NAMES[m % 12] + String(Math.floor(m / 12) - 1);
+    const midiHz = (m) => 440 * Math.pow(2, (m - 69) / 12);
+
+    // Deterministic PRNG so a seed reproduces an entire "session" of music.
+    function mulberry32(seed) {
+      let a = seed >>> 0;
+      return function () {
+        a |= 0; a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    // Contemplative modes as semitone offsets from the root.
+    const MODES = {
+      minorPent: [0, 3, 5, 7, 10],
+      dorian: [0, 2, 3, 5, 7, 9, 10],
+      mixolydian: [0, 2, 4, 5, 7, 9, 10],
+      aeolian: [0, 2, 3, 5, 7, 8, 10],
+    };
+
+    // Calm 4-chord progressions per mode, as 0-based scale degrees. Each
+    // chord lasts 4 beats, so a progression spans two 8-beat phrases.
+    const PROGRESSIONS = {
+      minorPent: [[0, 3, 4, 2], [0, 4, 3, 2], [3, 4, 0, 2], [0, 2, 3, 4]],
+      dorian: [[0, 6, 3, 4], [0, 2, 3, 0], [0, 3, 4, 0], [6, 3, 4, 6]],
+      mixolydian: [[0, 3, 6, 3], [0, 5, 3, 0], [0, 2, 3, 0], [3, 6, 3, 6]],
+      aeolian: [[0, 5, 2, 6], [0, 3, 4, 0], [0, 6, 5, 6], [5, 2, 6, 5]],
+    };
+
+    // Keys: bass root in the low register; the melody register is two
+    // octaves above it (bass+12 .. bass+34).
+    const KEYS = [
+      { mode: 'minorPent', bass: 45 },   // A minor pentatonic, A2
+      { mode: 'minorPent', bass: 40 },   // E minor pentatonic, E2
+      { mode: 'dorian', bass: 38 },      // D Dorian, D2
+      { mode: 'mixolydian', bass: 43 },  // G Mixolydian, G2
+      { mode: 'aeolian', bass: 45 },     // A Aeolian, A2
+    ];
+
+    function weightedPick(pairs, rng) {
+      let total = 0;
+      for (const [, w] of pairs) total += w;
+      let r = rng() * total;
+      for (const [v, w] of pairs) { r -= w; if (r <= 0) return v; }
+      return pairs[pairs.length - 1][0];
+    }
+
+    function createComposer(seed) {
+      const rng = mulberry32(seed === undefined ? (Math.random() * 0x100000000) >>> 0 : seed);
+      const state = {
+        keyIdx: Math.floor(rng() * KEYS.length),
+        progression: null,
+        phraseCount: 0,
+        beat: 0,
+        nextModulation: 6 + Math.floor(rng() * 7), // 6..12 phrases
+        lastMidi: null,
+        lastIdx: null,
+        motif: null,
+        motifPos: 0,
+      };
+
+      const key = () => KEYS[state.keyIdx];
+      const scaleOffsets = () => MODES[key().mode];
+
+      // Ascending scale notes in the melody register.
+      function melodyScale(k, offs) {
+        const out = [];
+        for (const oct of [12, 24]) {
+          for (const o of offs) {
+            const m = k.bass + oct + o;
+            if (m <= k.bass + 34) out.push(m);
+          }
+        }
+        return out;
+      }
+
+      // Diatonic triad on scale degree `deg`, as midi notes in the melody
+      // register (incomplete in pentatonic keys — that is fine).
+      function chordTones(k, offs, deg) {
+        const n = offs.length;
+        const root = k.bass + 12 + offs[deg % n];
+        const out = new Set([root]);
+        for (const d of [deg + 2, deg + 4]) {
+          let m = k.bass + 12 + offs[d % n];
+          if (m < root) m += 12;
+          out.add(m);
+        }
+        return out;
+      }
+
+      function startMotif(scale) {
+        const len = 3 + Math.floor(rng() * 3); // 3..5 steps
+        const steps = [];
+        for (let i = 0; i < len; i++) steps.push(Math.floor(rng() * 5) - 2);
+        if (steps.every((s) => s === 0)) steps[0] = 1;
+        const anchor = state.lastIdx === null
+          ? Math.floor(scale.length / 2)
+          : Math.max(0, Math.min(scale.length - 1, state.lastIdx + Math.floor(rng() * 5) - 2));
+        state.motif = { steps, anchor, cum: 0 };
+        state.motifPos = 0;
+      }
+
+      // Classical variation: invert, retrograde, transpose, or fragment.
+      function developMotif(scale) {
+        const m = state.motif;
+        const r = rng();
+        if (r < 0.25) m.steps = m.steps.map((s) => -s);
+        else if (r < 0.5) m.steps = m.steps.slice().reverse();
+        else if (r < 0.75) m.anchor = Math.max(0, Math.min(scale.length - 1, m.anchor + 1 + Math.floor(rng() * 3)));
+        else m.steps = m.steps.slice(0, 2);
+        m.cum = 0;
+        state.motifPos = 0;
+      }
+
+      function consumeMotif(scale) {
+        const step = state.motif.steps[state.motifPos++];
+        state.motif.cum += step;
+        const deg = Math.max(0, Math.min(scale.length - 1, state.motif.anchor + state.motif.cum));
+        return scale[deg];
+      }
+
+      // Rule-based note choice: stepwise motion preferred, chord tones and
+      // the tonic are magnets, the answer half is pulled below the call's
+      // peak, and blue notes (neighbouring off-scale semitones) appear at a
+      // rate set by `surprise`.
+      function pickNote(scale, scaleSet, offs, chordDeg, tonic, peak, beat, surprise, k) {
+        const chord = chordTones(k, offs, chordDeg);
+        const pairs = [];
+        for (let i = 0; i < scale.length; i++) {
+          const m = scale[i];
+          const dist = state.lastIdx === null ? 1 : Math.abs(i - state.lastIdx);
+          let w;
+          if (dist === 0) w = 0.5;
+          else if (dist === 1) w = 3.0;
+          else if (dist === 2) w = 1.6;
+          else if (dist === 3) w = 1.1;
+          else if (dist === 4) w = 0.8;
+          else w = 0.4;
+          if (chord.has(m)) w *= 2.0;
+          if (m === tonic) w *= 1.5;
+          if (beat >= 4 && peak !== null && m < peak) w *= 1.8;
+          pairs.push([m, w]);
+        }
+        if (state.lastMidi !== null && rng() < 0.04 + 0.22 * surprise) {
+          for (const b of [state.lastMidi - 1, state.lastMidi + 1]) {
+            if (!scaleSet.has(b) && b >= scale[0] - 1 && b <= scale[scale.length - 1] + 1) pairs.push([b, 0.9]);
+          }
+        }
+        return weightedPick(pairs, rng);
+      }
+
+      function nextPhrase() {
+        const phraseNo = state.phraseCount;
+        state.phraseCount++;
+        // Modulation: travel to a different key every 6..12 phrases.
+        if (phraseNo >= state.nextModulation) {
+          state.keyIdx = (state.keyIdx + 1 + Math.floor(rng() * (KEYS.length - 1))) % KEYS.length;
+          state.progression = null;
+          state.motif = null;
+          state.lastMidi = null;
+          state.lastIdx = null;
+          state.nextModulation = phraseNo + 6 + Math.floor(rng() * 7);
+        }
+        const k = key();
+        const offs = scaleOffsets();
+        if (!state.progression) {
+          const table = PROGRESSIONS[k.mode];
+          state.progression = table[Math.floor(rng() * table.length)];
+        }
+        const scale = melodyScale(k, offs);
+        const scaleSet = new Set(scale);
+        const surprise = rng();
+        const timbre = {
+          cutoff: Math.round(400 + rng() * 900),
+          detune: Math.round((2 + rng() * 5) * 10) / 10,
+          triangle: rng() < 0.25,
+        };
+        const tonic = k.bass + 12;
+        const events = [];
+        let firstHalfPeak = null;
+        if (!state.motif && rng() < 0.6) startMotif(scale);
+        for (let beat = 0; beat < 8; beat++) {
+          const gb = state.beat + beat;
+          const chordDeg = state.progression[Math.floor(gb / 4) % 4];
+          // Bass: the chord root, one event per chord change.
+          if (gb % 4 === 0) {
+            events.push({ beat, midi: k.bass + offs[chordDeg], dur: 4, vel: 0.5, kind: 'bass' });
+          }
+          const isCadence = beat === 7;
+          let rest = false;
+          if (!isCadence) {
+            if (beat === 0 && rng() < 0.25) rest = true;
+            else if (rng() < 0.10 + 0.15 * surprise) rest = true;
+          }
+          if (rest) continue;
+          let midi;
+          if (isCadence) {
+            // Always land on a chord tone: the next chord's root (anticipation).
+            const nextDeg = state.progression[(Math.floor(gb / 4) + 1) % 4];
+            midi = k.bass + 12 + offs[nextDeg];
+          } else if (state.motif) {
+            if (state.motifPos >= state.motif.steps.length) {
+              const r = rng();
+              if (r < 0.5) startMotif(scale);
+              else if (r < 0.8) developMotif(scale);
+              else state.motif = null;
+            }
+            if (state.motif && state.motifPos < state.motif.steps.length) midi = consumeMotif(scale);
+            else midi = pickNote(scale, scaleSet, offs, chordDeg, tonic, firstHalfPeak, beat, surprise, k);
+          } else {
+            midi = pickNote(scale, scaleSet, offs, chordDeg, tonic, firstHalfPeak, beat, surprise, k);
+            if (rng() < 0.3) startMotif(scale);
+          }
+          let dur = weightedPick([[0.5, 0.15], [1, 0.55], [1.5, 0.10], [2, 0.20]], rng);
+          if (isCadence) dur = 2;
+          let vel = 0.45 + 0.35 * Math.sin(Math.PI * beat / 7);
+          if (isCadence) vel *= 0.8;
+          let b = beat;
+          if (!isCadence && rng() < 0.25 * surprise) b += 0.5; // gentle syncopation
+          events.push({ beat: b, midi, dur, vel: Math.round(vel * 100) / 100, kind: 'melody' });
+          state.lastMidi = midi;
+          state.lastIdx = scale.indexOf(midi);
+          if (beat < 4 && (firstHalfPeak === null || midi > firstHalfPeak)) firstHalfPeak = midi;
+        }
+        state.beat += 8;
+        events.sort((a, b) => a.beat - b.beat);
+        return {
+          events,
+          surprise,
+          timbre,
+          phraseNo,
+          key: { mode: k.mode, bass: k.bass, name: k.mode + ' on ' + midiName(k.bass) },
+          progression: state.progression.slice(),
+        };
+      }
+
+      return { nextPhrase, state };
+    }
 
     const VOLUME_STORAGE_KEY = 'agentChirp.volumes.v2';
     const CHAT_COLUMN_SELECTOR = '[data-chat-flow]';
@@ -129,41 +369,64 @@ window.__ModuleLoader__.load({
         playDoneChime();
       }
 
-      // --- thinking: a warm sustained pad with a slow swell ---
-      const PAD_PERIOD_MS = 1400;
+      // --- thinking: a composed melody (the Muse) ---
+      // One phrase (8 beats) is composed and scheduled per interval tick; the
+      // composer keeps its own musical state across phrases.
+      const BEAT_MS = 480;
+      const PHRASE_BEATS = 8;
       let padTimer = null;
-      let padNoteCount = 0;
+      let composer = null;
+
+      function scheduleMelodyEvent(ev, t0, timbre) {
+        const beatSec = BEAT_MS / 1000;
+        const t = t0 + ev.beat * beatSec;
+        const durSec = ev.dur * beatSec;
+        const isBass = ev.kind === 'bass';
+        const peak = (isBass ? 0.05 : 0.09) * Math.max(0.2, currentIntensity) * currentVolumes.thinking * ev.vel;
+        if (peak <= 0.0001) return; // volume or intensity is zero: stay silent
+        const f = midiHz(ev.midi);
+        const voices = isBass
+          ? [[f, 0, 'sine']]
+          : [[f, 0, timbre.triangle ? 'triangle' : 'sine'], [f, timbre.detune, 'sine']];
+        for (const [freq, detune, type] of voices) {
+          const osc = ctx.createOscillator();
+          const g = ctx.createGain();
+          osc.type = type;
+          osc.frequency.value = freq;
+          osc.detune.value = detune;
+          const attack = isBass ? 0.15 : 0.08;
+          const release = Math.min(1.2, Math.max(0.3, durSec * 0.9));
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(peak, t + attack);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + attack + release);
+          if (isBass) {
+            osc.connect(g).connect(master);
+          } else {
+            const lp = ctx.createBiquadFilter();
+            lp.type = 'lowpass';
+            lp.frequency.value = timbre.cutoff;
+            osc.connect(lp).connect(g).connect(master);
+          }
+          osc.start(t);
+          osc.stop(t + attack + release + 0.05);
+        }
+      }
 
       function thinkPad() {
         ensureCtx();
         if (padTimer) return; // already running
-        const spawnPad = () => {
+        if (!composer) composer = createComposer();
+        const spawnPhrase = () => {
           if (!ctx) return;
-          // Sparse: ~70% chance per period to keep it calm.
-          if (Math.random() < 0.3) return;
-          const t = ctx.currentTime;
-          const base = SCALE_LOW[padNoteCount % SCALE_LOW.length];
-          padNoteCount++;
-          // Two slightly detuned oscillators for a warm chord tone.
-          [base, base * 1.5].forEach((f, idx) => {
-            const osc = ctx.createOscillator();
-            const g = ctx.createGain();
-            osc.type = 'sine';
-            osc.frequency.value = f * (1 + (idx === 0 ? 0.003 : -0.003));
-            const peak = (idx === 0 ? 0.10 : 0.05) * Math.max(0.2, currentIntensity) * currentVolumes.thinking;
-            g.gain.setValueAtTime(0.0001, t);
-            g.gain.linearRampToValueAtTime(peak, t + 0.5);
-            g.gain.linearRampToValueAtTime(0.0001, t + 1.25);
-            const lp = ctx.createBiquadFilter();
-            lp.type = 'lowpass';
-            lp.frequency.value = 900;
-            osc.connect(lp).connect(g).connect(master);
-            osc.start(t);
-            osc.stop(t + 1.3);
-          });
+          // While the context is suspended the clock is frozen; skip
+          // composition so notes do not stack at one instant.
+          if (ctx.state !== 'running') return;
+          const phrase = composer.nextPhrase();
+          const t0 = ctx.currentTime + 0.05;
+          for (const ev of phrase.events) scheduleMelodyEvent(ev, t0, phrase.timbre);
         };
-        spawnPad();
-        padTimer = setInterval(spawnPad, PAD_PERIOD_MS);
+        spawnPhrase();
+        padTimer = setInterval(spawnPhrase, PHRASE_BEATS * BEAT_MS);
       }
 
       function stopPad() {
@@ -612,6 +875,11 @@ window.__ModuleLoader__.load({
         console.warn('[agent-chirp] render failed:', err);
         return null;
       }
+    }
+
+    // Test seam: expose the pure composer for Node-based tests.
+    if (typeof window !== 'undefined') {
+      window.__agentChirpTest = { createComposer, createAudioEngine, MODES, KEYS, PROGRESSIONS, midiName, midiHz, mulberry32 };
     }
 
     return {

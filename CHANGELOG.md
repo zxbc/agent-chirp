@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.2.0] - 2026-11-01
+
+### Changed
+- **The thinking sound is now a generated melody instead of a fixed pad.**
+  The old sound was a continuous detuned drone plus a deterministic loop of
+  six ascending pentatonic notes — it became predictable and tiresome after a
+  few minutes. It is replaced by "The Muse", a small procedural composer that
+  writes short 8-beat phrases in real time: a two-note bass (chord roots)
+  under a stepwise melody, with rotating modes and keys (A and E minor
+  pentatonic, D dorian, G mixolydian, A aeolian), 16-beat chord
+  progressions, recurring motifs that are inverted, retrograded, and
+  transposed when exhausted, cadences that anticipate the next chord,
+  weighted stepwise motion with chord-tone and tonic bias, occasional
+  off-scale "blue" notes, syncopation, and per-phrase timbre variation
+  (filter cutoff, detune, triangle blend). Every phrase is different; the
+  seed is random per session. Design document: `docs/thinking-melody.md`.
+- **Thinking volume slider now controls the melody.** The same
+  `volume.thinking` setting scales the melody's peak gain (bass 0.05, melody
+  0.09 at full intensity) in place of the old pad levels.
+
+### Added
+- `test/composer.test.mjs` — deterministic-seed reproducibility, 200-phrase
+  invariant suite (bass on chord roots, cadence = next chord's root, register
+  and velocity bounds, off-scale and stepwise rates, key rotation).
+- `test/audio.test.mjs` — drives the audio engine against a mock
+  AudioContext and verifies oscillator scheduling, gain ramps, phase
+  start/stop, the done-chime, and zero-volume silence.
+- `docs/thinking-melody.md` — design document for the melody system.
+
 ## [1.1.1] - 2026-11-01
 
 ### Fixed
