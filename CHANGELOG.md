@@ -3,6 +3,9 @@
 ## [1.2.0] - 2026-11-01
 
 ### Changed
+- **Pill colors:** `answering` is now blue (`#58a6ff`), `thinking` is a
+  greener teal (`#2dd4a0`), and the turn-time readout is reddish brown
+  (`#a0522d`).
 - **The thinking sound is now a generated melody instead of a fixed pad.**
   The old sound was a continuous detuned drone plus a deterministic loop of
   six ascending pentatonic notes — it became predictable and tiresome after a

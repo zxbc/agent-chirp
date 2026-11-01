@@ -541,11 +541,12 @@ window.__ModuleLoader__.load({
 
     // --- Phase colours & labels (coloured like the previous pill) ---
     const PHASE_COLOR = {
-      thinking: '#2dd4bf',
+      thinking: '#2dd4a0',
       tools: '#e8a838',
-      answering: '#5ee6a8',
+      answering: '#58a6ff',
       idle: '#555',
     };
+    const TIME_COLOR = '#a0522d'; // reddish brown (sienna)
     const PHASE_LABEL = {
       thinking: 'Thinking',
       tools: 'Using tools',
@@ -763,7 +764,9 @@ window.__ModuleLoader__.load({
           indicatorEl.setAttribute(INDICATOR_ATTR, '');
           indicatorEl.style.cssText = INDICATOR_CSS;
           indicatorEl.appendChild(makeSpan('data-activity'));
-          indicatorEl.appendChild(makeSpan('data-time'));
+          const timeSpan = makeSpan('data-time');
+          timeSpan.style.color = TIME_COLOR;
+          indicatorEl.appendChild(timeSpan);
           column.appendChild(indicatorEl);
           return true;
         }

@@ -17,9 +17,9 @@ ticks while tools run, and a bright arpeggio when the turn completes.
 ## The pill
 
 Agent Chirp adds a small status pill to the conversation composer dock. It
-shows three animated bars and a label — `thinking` (blue), `using tools`
-(amber), `answering` (green) — and goes quiet (grey, no animation) between
-turns. Clicking the pill opens a volume popover with a slider and percentage
+shows three animated bars and a label — `thinking` (green-teal), `using tools`
+(amber), `answering` (blue) — and goes quiet (grey, no animation) between
+turns. The turn-time readout is rendered in a reddish brown. Clicking the pill opens a volume popover with a slider and percentage
 readout; the chosen volume is remembered in the browser (localStorage) across
 restarts.
 
