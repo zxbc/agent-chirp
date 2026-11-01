@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.1.1] - 2026-11-01
+
+### Fixed
+- **Answering and tool-use sounds could be completely silent.** The live
+  block kind was read from the wrong data path — `conv.blocks` is `undefined`
+  on the `ConversationSnapshot` (the blocks live under
+  `conv.views.get('chat').legacy.partial.blocks`), so `liveBlockKind` was
+  always `null` and the phase never left the durable `thinking` phase set at
+  step start. Only the thinking pad and the done-chime ever played. Restored
+  the correct path.
+- **Tool-use sound was a single inaudible tick.** `toolTick()` was a one-shot
+  440 Hz sine burst with no interval. It now plays a repeating 300 ms tick
+  (`setInterval`, matching the previous working reference's continuous tool
+  tap) and is stopped via `stopTool()` on phase change — `stopAllLoops()` now
+  calls it.
+- **Tool-call block kind was matched as kebab-case.** The conversation block
+  kind for a tool call is `toolCall` (camelCase, per pi-ai), not `tool-call`,
+  so `liveBlockKind === 'tool-call'` never matched and the phase only became
+  `tools` via the durable `tool/call` event. Now matched as `'toolCall'`.
+- **Autoplay-policy deferral dropped in the v1.1.0 rewrite.** When the
+  AudioContext is suspended (browser autoplay policy), phase transitions and
+  the done-chime are now deferred and consumed on the context's `statechange`
+  event or on the next user interaction (`click`/`keydown`) instead of being
+  dropped — restoring the v1.0.1 behaviour that was removed.
+
 ## [1.1.0] - 2026-10-15
 
 ### Changed

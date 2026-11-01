@@ -9,21 +9,38 @@ window.__ModuleLoader__.load({
     const SCALE_LOW = [196.0, 220.0, 261.63, 293.66, 329.63, 392.0];
     const SCALE_HIGH = [523.25, 587.33, 659.25, 783.99, 880.0, 1046.5];
 
-    const VOLUME_STORAGE_KEY = 'agentChirp.volume';
+    const VOLUME_STORAGE_KEY = 'agentChirp.volumes.v2';
     const CHAT_COLUMN_SELECTOR = '[data-chat-flow]';
     const CORE_RUNNING_SELECTOR = '[data-chat-running]';
     const INDICATOR_ATTR = 'data-agent-chirp-indicator';
     const HIDE_CSS_ID = 'agent-chirp-hide-core-css';
 
-    function readStoredVolume(fallback) {
+    // The four distinct sound effects and their popover labels.
+    const SOUND_DEFS = [
+      { key: 'thinking', label: 'Thinking' },
+      { key: 'answering', label: 'Answering' },
+      { key: 'tools', label: 'Tools' },
+      { key: 'done', label: 'Done chime' },
+    ];
+
+    function clamp01(n) { return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0; }
+
+    // Per-sound volumes. Falls back to `fallback` for any sound not yet stored.
+    function readStoredVolumes(fallback) {
+      const out = { thinking: fallback, answering: fallback, tools: fallback, done: fallback };
       try {
         const s = localStorage.getItem(VOLUME_STORAGE_KEY);
         if (s !== null) {
-          const n = parseFloat(s);
-          if (Number.isFinite(n)) return Math.min(1, Math.max(0, n));
+          const parsed = JSON.parse(s);
+          if (parsed && typeof parsed === 'object') {
+            for (const k of Object.keys(out)) {
+              const n = parseFloat(parsed[k]);
+              if (Number.isFinite(n)) out[k] = clamp01(n);
+            }
+          }
         }
       } catch {}
-      return fallback;
+      return out;
     }
 
     // Format milliseconds as "[min]m[sec]s" — e.g. 312000 -> "5m12s", 45000 -> "45s".
@@ -35,25 +52,50 @@ window.__ModuleLoader__.load({
       return sec + 's';
     }
 
-    function createAudioEngine(volume, intensity) {
+    function createAudioEngine(volumes, intensity) {
       let ctx = null;
       let master = null;
-      let currentVolume = volume;
+      let currentVolumes = { thinking: 0, answering: 0, tools: 0, done: 0 };
+      for (const k of Object.keys(currentVolumes)) currentVolumes[k] = clamp01(volumes[k]);
       let currentIntensity = intensity;
+      // Deferred transitions: started only once the AudioContext is actually
+      // running (autoplay policy). resume() is asynchronous, so a synchronous
+      // ctx.state check right after resume still reads 'suspended'; pending
+      // transitions are consumed on the context's statechange event instead.
+      let pendingPhase = null;
+      let pendingDone = false;
+      let onContextState = null;
+
+      function applyPending() {
+        if (ctx.state !== 'running') return;
+        if (pendingDone) {
+          pendingDone = false;
+          playDoneChime();
+        }
+        if (pendingPhase) {
+          const p = pendingPhase;
+          pendingPhase = null;
+          if (p === 'thinking') thinkPad();
+          else if (p === 'answering') typeTick();
+          else if (p === 'tools') toolTick();
+        }
+      }
 
       function ensureCtx() {
         if (!ctx) {
           ctx = new AudioContext();
           master = ctx.createGain();
-          master.gain.value = currentVolume;
+          master.gain.value = 1; // no global scaling; per-sound volumes applied below
           master.connect(ctx.destination);
+          onContextState = () => applyPending();
+          ctx.addEventListener('statechange', onContextState);
+          applyPending(); // Apply pending if the context is already running.
         }
         if (ctx.state === 'suspended') ctx.resume();
       }
 
-      function setVolume(v) {
-        currentVolume = v;
-        if (ctx && master) master.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
+      function setVolume(key, v) {
+        currentVolumes[key] = clamp01(v);
       }
 
       function setPhase(phase) {
@@ -62,8 +104,9 @@ window.__ModuleLoader__.load({
         else if (phase === 'tools') toolTick();
       }
 
-      function done() {
-        ensureCtx();
+      // Plays the descending done-chime. Caller must guarantee ctx is
+      // non-null and running (setPhase/applyPending guard for this).
+      function playDoneChime() {
         const t0 = ctx.currentTime + 0.05;
         // Descending arpeggio: G5 -> E5 -> D5 -> C5, gentle triangle, quick decay.
         [783.99, 659.25, 587.33, 523.25].forEach((f, i) => {
@@ -73,12 +116,17 @@ window.__ModuleLoader__.load({
           osc.type = 'triangle';
           osc.frequency.value = f;
           g.gain.setValueAtTime(0.0001, t);
-          g.gain.exponentialRampToValueAtTime(0.12 * Math.max(0.3, currentIntensity), t + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.12 * Math.max(0.3, currentIntensity) * currentVolumes.done, t + 0.02);
           g.gain.exponentialRampToValueAtTime(0.0001, t + 0.5);
           osc.connect(g).connect(master);
           osc.start(t);
           osc.stop(t + 0.6);
         });
+      }
+
+      function done() {
+        if (!ctx || ctx.state !== 'running') { pendingDone = true; return; }
+        playDoneChime();
       }
 
       // --- thinking: a warm sustained pad with a slow swell ---
@@ -102,7 +150,7 @@ window.__ModuleLoader__.load({
             const g = ctx.createGain();
             osc.type = 'sine';
             osc.frequency.value = f * (1 + (idx === 0 ? 0.003 : -0.003));
-            const peak = (idx === 0 ? 0.10 : 0.05) * Math.max(0.2, currentIntensity);
+            const peak = (idx === 0 ? 0.10 : 0.05) * Math.max(0.2, currentIntensity) * currentVolumes.thinking;
             g.gain.setValueAtTime(0.0001, t);
             g.gain.linearRampToValueAtTime(peak, t + 0.5);
             g.gain.linearRampToValueAtTime(0.0001, t + 1.25);
@@ -152,7 +200,7 @@ window.__ModuleLoader__.load({
           bp.frequency.value = 2200 + Math.random() * 900;
           bp.Q.value = 1.2;
           const g = ctx.createGain();
-          const peak = 0.05 * Math.max(0.3, currentIntensity);
+          const peak = 0.05 * Math.max(0.3, currentIntensity) * currentVolumes.answering;
           g.gain.setValueAtTime(0.0001, t);
           g.gain.exponentialRampToValueAtTime(peak, t + 0.004);
           g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
@@ -168,27 +216,39 @@ window.__ModuleLoader__.load({
         if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
       }
 
-      // --- tools: a brief, higher sine tick ---
+      // --- tools: a brief, higher sine tick, repeated while tools run ---
+      const TOOL_PERIOD_MS = 300;
+      let toolTimer = null;
       function toolTick() {
         ensureCtx();
-        const t = ctx.currentTime;
-        const osc = ctx.createOscillator();
-        const g = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = 440;
-        const peak = 0.08 * Math.max(0.3, currentIntensity);
-        g.gain.setValueAtTime(0.0001, t);
-        g.gain.exponentialRampToValueAtTime(peak, t + 0.01);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
-        osc.connect(g).connect(master);
-        osc.start(t);
-        osc.stop(t + 0.3);
+        if (toolTimer) return; // already running
+        const spawnTool = () => {
+          if (!ctx) return;
+          const t = ctx.currentTime;
+          const osc = ctx.createOscillator();
+          const g = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = 440;
+          const peak = 0.08 * Math.max(0.3, currentIntensity) * currentVolumes.tools;
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(peak, t + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+          osc.connect(g).connect(master);
+          osc.start(t);
+          osc.stop(t + 0.3);
+        };
+        spawnTool();
+        toolTimer = setInterval(spawnTool, TOOL_PERIOD_MS);
+      }
+      function stopTool() {
+        if (toolTimer) { clearInterval(toolTimer); toolTimer = null; }
       }
 
       // Stop all ambient loops when leaving a phase.
       function stopAllLoops() {
         stopPad();
         stopType();
+        stopTool();
       }
 
       return {
@@ -196,14 +256,22 @@ window.__ModuleLoader__.load({
         setVolume,
         setPhase(phase) {
           stopAllLoops();
+          if (phase !== 'idle') pendingDone = false; // new turn started; cancel pending done chime
+          if (!ctx || ctx.state !== 'running') { pendingPhase = phase; return; }
           if (phase === 'thinking') thinkPad();
           else if (phase === 'answering') typeTick();
           else if (phase === 'tools') toolTick();
         },
         done,
+        onUserInteraction() { ensureCtx(); applyPending(); },
         dispose() {
           stopAllLoops();
-          if (ctx) { ctx.close(); ctx = null; master = null; }
+          pendingPhase = null; pendingDone = false;
+          if (ctx) {
+            if (onContextState) { try { ctx.removeEventListener('statechange', onContextState); } catch (_) {} onContextState = null; }
+            try { Promise.resolve(ctx.close()).catch(() => {}); } catch (_) {}
+            ctx = null; master = null;
+          }
         },
       };
     }
@@ -222,9 +290,11 @@ window.__ModuleLoader__.load({
       idle: 'Chirp',
     };
 
-    // --- Volume popover ---
-    function VolumePopover({ initialVolume, onCommit, onClose, anchor }) {
-      const [vol, setVol] = React.useState(initialVolume);
+    // --- Volume popover: one slider per sound effect ---
+    function VolumePopover({ volumes, onCommit, onClose, anchor }) {
+      const [local, setLocal] = React.useState({ thinking: 0, answering: 0, tools: 0, done: 0, ...volumes });
+      const localRef = React.useRef(local);
+      localRef.current = local;
       const ref = React.useRef(null);
 
       React.useEffect(() => {
@@ -240,8 +310,6 @@ window.__ModuleLoader__.load({
         };
       }, [onClose]);
 
-      const pct = Math.round(vol * 100);
-
       // Position the panel anchored to the icon (above it, right-aligned to the
       // icon's right edge). Fall back to a fixed corner if no anchor is available.
       const popoverStyle = {
@@ -253,7 +321,7 @@ window.__ModuleLoader__.load({
         borderRadius: 10,
         boxShadow: '0 8px 28px rgba(0,0,0,0.28)',
         padding: '12px 14px',
-        display: 'flex', flexDirection: 'column', gap: 10,
+        display: 'flex', flexDirection: 'column', gap: 12,
       };
       if (anchor) {
         popoverStyle.right = Math.round(window.innerWidth - anchor.right);
@@ -268,13 +336,35 @@ window.__ModuleLoader__.load({
         h('path', { d: 'M10.467 5.72A3.3 3.3 0 0 1 10.467 10.28L11.12 10.9a4.36 4.36 0 0 0 0-6.36l-.653.667Z', fill: 'currentColor' }),
       );
 
+      // One labelled slider row per sound.
+      const rows = SOUND_DEFS.map(({ key, label }) => {
+        const pct = Math.round(clamp01(local[key]) * 100);
+        return h('div', { key, style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
+            h('span', { style: { color: 'var(--dsw-alias-label-secondary)', fontSize: 12, fontWeight: 600 } }, label),
+            h('span', { style: { color: 'var(--dsw-alias-label-tertiary)', fontSize: 12, fontVariantNumeric: 'tabular-nums' } }, pct + '%'),
+          ),
+          h('input', {
+            type: 'range', min: 0, max: 100, step: 1,
+            value: pct,
+            onChange: (e) => {
+              const v = parseInt(e.target.value, 10) / 100;
+              setLocal((prev) => ({ ...prev, [key]: v }));
+              localRef.current = { ...localRef.current, [key]: v };
+            },
+            onMouseUp: () => onCommit(key, clamp01(localRef.current[key])),
+            onTouchEnd: () => onCommit(key, clamp01(localRef.current[key])),
+            onKeyUp: (e) => { if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') onCommit(key, clamp01(localRef.current[key])); },
+            style: { width: '100%', accentColor: 'var(--dsw-alias-brand-primary)', cursor: 'pointer' },
+          }),
+        );
+      });
+
       return h(React.Fragment, null,
         h('div', {
           onMouseDown: (e) => e.stopPropagation(),
           onClick: (e) => e.stopPropagation(),
-          style: {
-            position: 'fixed', inset: 0, zIndex: 9998,
-          },
+          style: { position: 'fixed', inset: 0, zIndex: 9998 },
           onClick: onClose,
         }),
         h('div', {
@@ -286,22 +376,14 @@ window.__ModuleLoader__.load({
           h('div', {
             style: {
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              color: 'var(--dsw-alias-label-secondary)', fontSize: 12, fontWeight: 600,
+              color: 'var(--dsw-alias-label-secondary)', fontSize: 12, fontWeight: 700,
               letterSpacing: '0.02em',
             },
-          }, h('span', null, 'Chirp volume'), h('span', { style: { color: 'var(--dsw-alias-label-tertiary)', fontVariantNumeric: 'tabular-nums' } }, pct + '%')),
-          h('input', {
-            type: 'range', min: 0, max: 100, step: 1,
-            value: pct,
-            onChange: (e) => setVol(parseInt(e.target.value, 10) / 100),
-            onMouseUp: () => onCommit(vol),
-            onTouchEnd: () => onCommit(vol),
-            onKeyUp: (e) => { if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') onCommit(vol); },
-            style: { width: '100%', accentColor: 'var(--dsw-alias-brand-primary)', cursor: 'pointer' },
-          }),
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 } },
+          }, h('span', null, 'Chirp volume'), h('span', { style: { color: 'var(--dsw-alias-label-tertiary)', fontWeight: 500 } }, 'per sound')),
+          ...rows,
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-tertiary)', fontSize: 11 } },
             speakerIcon,
-            h('span', null, 'Released on mouse-up'),
+            h('span', null, 'Applies on release'),
           ),
         ),
       );
@@ -319,9 +401,10 @@ window.__ModuleLoader__.load({
       const projection = useProjection('agentChirp');
       const running = useSessionStatus((s) => s.get(sessionId)?.running === true);
       const liveBlockKind = useConversation((conv) => {
-        if (!conv || !conv.blocks || conv.blocks.length === 0) return null;
-        const last = conv.blocks[conv.blocks.length - 1];
-        return last.partial ? last.kind : null;
+        const chat = conv && conv.views ? conv.views.get('chat') : undefined;
+        const partial = chat && chat.legacy ? chat.legacy.partial : null;
+        if (!partial || !partial.blocks || partial.blocks.length === 0) return null;
+        return partial.blocks[partial.blocks.length - 1].kind;
       });
 
       const enabled = projection?.enabled !== false;
@@ -331,12 +414,12 @@ window.__ModuleLoader__.load({
       const effectivePhase = !enabled || !running ? 'idle'
         : liveBlockKind === 'reasoning' ? 'thinking'
         : liveBlockKind === 'text' ? 'answering'
-        : liveBlockKind === 'tool-call' ? 'tools'
+        : liveBlockKind === 'toolCall' ? 'tools'
         : durablePhase;
 
-      const [volume, setVolume] = React.useState(() => readStoredVolume(baseVolume));
-      const volumeRef = React.useRef(volume);
-      volumeRef.current = volume;
+      const [volumes, setVolumes] = React.useState(() => readStoredVolumes(baseVolume));
+      const volumesRef = React.useRef(volumes);
+      volumesRef.current = volumes;
 
       const [popoverOpen, setPopoverOpen] = React.useState(false);
       const [popoverAnchor, setPopoverAnchor] = React.useState(null);
@@ -346,7 +429,10 @@ window.__ModuleLoader__.load({
       const lastPhaseRef = React.useRef('idle');
       React.useEffect(() => {
         if (!engineRef.current) {
-          engineRef.current = createAudioEngine(volumeRef.current, intensity);
+          engineRef.current = createAudioEngine(volumesRef.current, intensity);
+          // Resume the AudioContext on any user interaction (autoplay policy).
+          document.addEventListener('click', engineRef.current.onUserInteraction);
+          document.addEventListener('keydown', engineRef.current.onUserInteraction);
         }
         const phase = effectivePhase;
         if (phase !== lastPhaseRef.current) {
@@ -355,7 +441,14 @@ window.__ModuleLoader__.load({
           lastPhaseRef.current = phase;
         }
       }, [effectivePhase, intensity]);
-      React.useEffect(() => () => { engineRef.current?.dispose(); engineRef.current = null; }, []);
+      React.useEffect(() => () => {
+        if (engineRef.current) {
+          document.removeEventListener('click', engineRef.current.onUserInteraction);
+          document.removeEventListener('keydown', engineRef.current.onUserInteraction);
+          engineRef.current.dispose();
+          engineRef.current = null;
+        }
+      }, []);
 
       // --- Turn-timing tracking for the deep-dive indicator ---
       const turnStartRef = React.useRef(null);
@@ -466,11 +559,11 @@ window.__ModuleLoader__.load({
           setPopoverOpen(true);
         }
       };
-      const commitVolume = (v) => {
-        setVolume(v);
-        try { localStorage.setItem(VOLUME_STORAGE_KEY, String(v)); } catch {}
-        engineRef.current?.setVolume(v);
-        setPopoverOpen(false);
+      const commitVolumes = (key, v) => {
+        const next = { ...volumesRef.current, [key]: clamp01(v) };
+        setVolumes(next);
+        try { localStorage.setItem(VOLUME_STORAGE_KEY, JSON.stringify(next)); } catch {}
+        engineRef.current?.setVolume(key, clamp01(v));
       };
 
       const speakerIcon = h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, 'aria-hidden': true },
@@ -504,8 +597,8 @@ window.__ModuleLoader__.load({
       },
         speakerIcon,
         popoverOpen && h(VolumePopover, {
-          initialVolume: volume,
-          onCommit: commitVolume,
+          volumes,
+          onCommit: commitVolumes,
           onClose: () => setPopoverOpen(false),
           anchor: popoverAnchor,
         }),
