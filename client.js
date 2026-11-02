@@ -756,6 +756,26 @@ window.__ModuleLoader__.load({
         if (!partial || !partial.blocks || partial.blocks.length === 0) return null;
         return partial.blocks[partial.blocks.length - 1].kind;
       });
+      // Authoritative turn boundaries from the durable conversation timeline.
+      // `turn.start.time` / `turn.end.time` are host-clock epoch ms, replayed from
+      // the session log on every mount, so they survive remounts and are immune to
+      // transient running-flag dips (maintenance/compaction).
+      const turnStartAtRef = React.useRef(null);
+      const turnEndAtRef = React.useRef(null);
+      useConversation((conv) => {
+        const chat = conv && conv.views ? conv.views.get('chat') : undefined;
+        const timeline = chat && chat.timeline;
+        if (!timeline || !timeline.turnOrder || timeline.turnOrder.length === 0) {
+          turnStartAtRef.current = null;
+          turnEndAtRef.current = null;
+          return null;
+        }
+        const currentTurn = timeline.turnOrder[timeline.turnOrder.length - 1];
+        const turn = timeline.turns.get(currentTurn);
+        turnStartAtRef.current = turn && turn.start ? turn.start.time : null;
+        turnEndAtRef.current = turn && turn.end ? turn.end.time : null;
+        return null;
+      });
 
       const enabled = projection?.enabled !== false;
       const baseVolume = projection?.volume ?? 0.25;
@@ -800,25 +820,13 @@ window.__ModuleLoader__.load({
         }
       }, []);
 
-      // --- Turn-timing tracking for the deep-dive indicator ---
-      const turnStartRef = React.useRef(null);
-      const persistedDurationRef = React.useRef(null);
+      // --- Indicator state refs (timer itself is driven by turnStartAtRef/turnEndAtRef) ---
       const runningRef = React.useRef(running);
       runningRef.current = running;
       const phaseRef = React.useRef(effectivePhase);
       phaseRef.current = effectivePhase;
       const enabledRef = React.useRef(enabled);
       enabledRef.current = enabled;
-
-      React.useEffect(() => {
-        if (running) {
-          turnStartRef.current = Date.now();
-          persistedDurationRef.current = null;
-        } else if (turnStartRef.current !== null) {
-          persistedDurationRef.current = Date.now() - turnStartRef.current;
-          turnStartRef.current = null;
-        }
-      }, [running]);
 
       // --- Deep-dive indicator rendered at the chat tail ---
       React.useEffect(() => {
@@ -865,14 +873,17 @@ window.__ModuleLoader__.load({
           }
           if (!enabledRef.current) { indicatorEl.style.display = 'none'; return; }
           const isRunning = runningRef.current;
-          const turnStart = turnStartRef.current;
-          const persisted = persistedDurationRef.current;
-          if (!isRunning && persisted === null) {
+          const turnStartAt = turnStartAtRef.current;
+          const turnEndAt = turnEndAtRef.current;
+          if (turnStartAt === null) {
             indicatorEl.style.display = 'none';
             return;
           }
           indicatorEl.style.display = 'inline-flex';
-          const ms = isRunning ? Date.now() - turnStart : persisted;
+          // Total current-turn time: live while the turn is open, frozen at the
+          // turn's end time once closed. Anchored to the authoritative turn/start
+          // event time, so it never restarts on remounts or running-flag dips.
+          const ms = turnEndAt !== null ? turnEndAt - turnStartAt : Date.now() - turnStartAt;
           const duration = formatDuration(ms);
           const activityEl = indicatorEl.querySelector('[data-activity]');
           const timeEl = indicatorEl.querySelector('[data-time]');
